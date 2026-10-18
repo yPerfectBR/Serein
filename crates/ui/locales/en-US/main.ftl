@@ -115,6 +115,7 @@ friends-active-now = Active Now
 friends-active-in-voice = In a voice channel
 friends-active-just-now = now
 friends-active-two = { $a } and { $b }
+friends-active-one-more = { $a }, { $b } and 1 other
 friends-active-many = { $a }, { $b } and { $n } others
 friends-active-join = Join Channel
 friends-active-open = Open Channel

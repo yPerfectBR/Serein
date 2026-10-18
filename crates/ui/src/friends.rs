@@ -1090,7 +1090,7 @@ impl MessagingUi {
 												for id in users.iter().take(ACTIVE_AVATARS).rev() {
 													if let Some(user) = state.friend(*id) {
 														self.avatars
-															.show_plain(ui, user, 28.0, demo);
+															.show_plain(ui, user, 24.0, demo);
 													}
 												}
 												ui.with_layout(
@@ -1422,6 +1422,7 @@ fn join_names(names: &[String]) -> String {
 		[] => String::new(),
 		[one] => one.clone(),
 		[a, b] => crate::i18n::translate_args("friends-active-two", &[("a", a), ("b", b)]),
+		[a, b, _] => crate::i18n::translate_args("friends-active-one-more", &[("a", a), ("b", b)]),
 		[a, b, rest @ ..] => crate::i18n::translate_args(
 			"friends-active-many",
 			&[("a", a), ("b", b), ("n", &rest.len().to_string())],
@@ -1494,7 +1495,7 @@ fn active_row(
 	response
 }
 
-const ACTIVE_WIDTH: f32 = 340.0;
+const ACTIVE_WIDTH: f32 = 380.0;
 /// The column only appears when the list keeps a comfortable width beside it.
 const ACTIVE_MIN_WIDTH: f32 = 720.0;
 const ACTIVE_LIMIT: usize = 30;

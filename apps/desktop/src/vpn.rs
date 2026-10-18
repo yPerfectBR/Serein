@@ -229,9 +229,13 @@ pub fn ensure_agent(_: &Path, _: &Path) -> Result<(), String> {
 /// The one-line request that asks the agent to start Serein with this process's display and locale
 /// environment (the same allow-list as for the restart helper).
 fn spawn_message() -> String {
-	let environment: std::collections::BTreeMap<String, String> = std::env::vars()
+	let mut environment: std::collections::BTreeMap<String, String> = std::env::vars()
 		.filter(|(key, value)| forwarded(key, value))
 		.collect();
+	// Privacy-safe voice diagnostics (counters and event names) go to the log unless turned off.
+	environment
+		.entry("SEREIN_VOICE_DIAGNOSTICS".to_owned())
+		.or_insert_with(|| "1".to_owned());
 	serde_json::json!({ "env": environment }).to_string()
 }
 

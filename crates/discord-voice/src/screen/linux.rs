@@ -211,6 +211,7 @@ pub(super) fn run(
 						audio_stopped = true;
 					}
 					if pipeline.failed() {
+						note("pipeline_failed", mode.label());
 						break;
 					}
 					let target = bitrate
@@ -226,6 +227,7 @@ pub(super) fn run(
 							// cannot change rate while playing: reopen the same mode with a
 							// fresh PipeWire remote, keeping the approved portal.
 							if mode != Mode::Software {
+								note("bitrate_restart", mode.label());
 								mode_index -= 1;
 								break;
 							}
@@ -243,6 +245,7 @@ pub(super) fn run(
 					if visible != requested_visible {
 						visible = requested_visible;
 						pipeline.set_preview_visible(visible);
+						note("preview_visible", if visible { "true" } else { "false" });
 						if !visible {
 							first_preview = None;
 						}
@@ -258,6 +261,7 @@ pub(super) fn run(
 					if first_preview
 						.is_some_and(|start: Instant| start.elapsed() > Duration::from_secs(15))
 					{
+						note("no_preview_for_15s", mode.label());
 						break;
 					}
 					if !ready.load(Ordering::Acquire) {
@@ -368,6 +372,7 @@ pub(super) fn run(
 						}
 						// Only startup has a frame deadline: an unchanged desktop can stop producing frames.
 						if waiting_keyframe && started.elapsed() > Duration::from_secs(15) {
+							note("no_keyframe_sent_for_15s", mode.label());
 							break;
 						}
 					}
