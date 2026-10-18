@@ -101,5 +101,76 @@ class Commands(unittest.TestCase):
                     os.environ[key] = value
 
 
+agent_loader = importlib.machinery.SourceFileLoader("serein_vpn_agent", os.path.join(os.path.dirname(__file__), "serein-vpn-agent"))
+agent_spec = importlib.util.spec_from_loader("serein_vpn_agent", agent_loader)
+agent = importlib.util.module_from_spec(agent_spec)
+agent_loader.exec_module(agent)
+
+
+class Agent(unittest.TestCase):
+    def test_environment_is_filtered(self):
+        base = {"HOME": "/h", "AWS_SECRET_ACCESS_KEY": "x", "LD_PRELOAD": "/x", "SEREIN_VPN_ACTIVE": "1",
+                "SEREIN_VPN_ENDPOINT": "1.2.3.4:5", "WAYLAND_DISPLAY": "wayland-0"}
+        env = agent.filter_env({"XDG_RUNTIME_DIR": "/run/user/1", "GITHUB_TOKEN": "t",
+                                "SEREIN_VPN_ACTIVE": "0", "LANG": "x\ny"}, base)
+        self.assertEqual(env["HOME"], "/h")
+        self.assertEqual(env["WAYLAND_DISPLAY"], "wayland-0")
+        self.assertEqual(env["XDG_RUNTIME_DIR"], "/run/user/1")
+        self.assertEqual(env["SEREIN_VPN_ACTIVE"], "1", "the tunnel markers come from the agent only")
+        for key in ("AWS_SECRET_ACCESS_KEY", "LD_PRELOAD", "GITHUB_TOKEN", "LANG"):
+            self.assertNotIn(key, env)
+
+    def test_only_the_serein_executable_can_be_served(self):
+        with tempfile.TemporaryDirectory() as directory:
+            other = os.path.join(directory, "other")
+            open(other, "w").write("#!/bin/sh\n")
+            os.chmod(other, 0o755)
+            for bad in (other, "serein", os.path.join(directory, "missing", "serein")):
+                with self.assertRaises(SystemExit):
+                    agent.check_executable(bad)
+
+    def test_a_request_starts_the_program_and_quit_stops_the_agent(self):
+        import json, socket, subprocess, sys, time
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = os.path.join(directory, "run")
+            os.mkdir(runtime, 0o700)
+            marker = os.path.join(directory, "started")
+            exe = os.path.join(directory, "serein")
+            open(exe, "w").write("#!/bin/sh\necho \"$WAYLAND_DISPLAY|$AWS_KEY|$SEREIN_VPN_ACTIVE\" > " + marker + "\n")
+            os.chmod(exe, 0o755)
+            env = dict(os.environ, XDG_RUNTIME_DIR=runtime, XDG_STATE_HOME=os.path.join(directory, "state"),
+                       SEREIN_VPN_AGENT_NO_TUNNEL_CHECK="1", SEREIN_VPN_ACTIVE="1")
+            process = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(__file__), "serein-vpn-agent"), exe], env=env)
+            path = os.path.join(runtime, "serein-vpn-agent.sock")
+            try:
+                for _ in range(50):
+                    if os.path.exists(path):
+                        break
+                    time.sleep(0.1)
+                self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
+
+                def ask(message):
+                    with socket.socket(socket.AF_UNIX) as client:
+                        client.settimeout(5)
+                        client.connect(path)
+                        client.sendall(json.dumps(message).encode() + b"\n")
+                        return client.recv(64)
+
+                self.assertEqual(ask({"ping": True}), b"ok\n")
+                self.assertEqual(ask("not an object"), b"error\n")
+                self.assertEqual(ask({"env": {"WAYLAND_DISPLAY": "wayland-9", "AWS_KEY": "secret"}}), b"ok\n")
+                for _ in range(50):
+                    if os.path.exists(marker):
+                        break
+                    time.sleep(0.1)
+                self.assertEqual(open(marker).read().strip(), "wayland-9||1")
+                self.assertEqual(ask({"quit": True}), b"ok\n")
+                process.wait(timeout=10)
+                self.assertFalse(os.path.exists(path), "the socket is removed on exit")
+            finally:
+                if process.poll() is None:
+                    process.kill()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -80,6 +80,7 @@ fn main() -> eframe::Result {
 	// connection exists. An invalid value blocks connections instead of falling back to direct.
 	net_route::init();
 	network_route::apply_saved_login();
+	vpn::enter_tunnel_at_startup();
 	if let net_route::State::Invalid(reason) = net_route::state() {
 		eprintln!(
 			"Serein: {reason}. Network connections stay blocked until SEREIN_PROXY or ~/.config/serein/proxy is fixed or removed."

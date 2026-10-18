@@ -1,0 +1,184 @@
+#!/usr/bin/python3
+"""Per-login launcher that lives inside the serein-vpn network namespace.
+
+Started once per login by `serein-vpn run` (the only step that asks for the administrator
+password). It runs as the calling user, not as root, and only ever starts the one executable it
+was given, so later Serein launches reach the tunnel without another prompt:
+
+    serein-vpn-agent /usr/local/bin/serein
+
+Requests arrive on $XDG_RUNTIME_DIR/serein-vpn-agent.sock (mode 0600, same-user peers only) as one
+JSON line: {"env": {"NAME": "value", ...}} to start the program with that (filtered) environment,
+or {"quit": true}. The agent ends by itself when the tunnel interface disappears.
+"""
+import json
+import os
+import re
+import signal
+import socket
+import struct
+import subprocess
+import sys
+
+SOCKET_NAME = "serein-vpn-agent.sock"
+INTERFACE = "wg-serein"
+MAX_REQUEST = 64 * 1024
+NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+PREFIXES = (
+    "XDG_", "WAYLAND_", "DBUS_", "LC_", "GDK_", "GTK_", "QT_", "WGPU_", "VK_", "MESA_", "__GL",
+    "__NV", "__VK", "DRI_", "LIBVA_", "PULSE_", "PIPEWIRE_", "XCURSOR_", "RUST_", "SEREIN_",
+)
+NAMES = ("DISPLAY", "LANG", "LANGUAGE", "TERM", "SHELL", "HOME", "USER", "LOGNAME", "PATH")
+RESERVED = ("SEREIN_VPN_", "SEREIN_NO_VPN")
+
+
+def socket_path():
+    return os.path.join(os.environ["XDG_RUNTIME_DIR"], SOCKET_NAME)
+
+
+def allowed(name, value):
+    return (
+        bool(NAME.match(name))
+        and (name in NAMES or name.startswith(PREFIXES))
+        and not name.startswith(RESERVED)
+        and isinstance(value, str)
+        and len(value) <= 4096
+        and "\n" not in value
+        and "\0" not in value
+    )
+
+
+def filter_env(requested, base):
+    environment = {k: v for k, v in base.items() if allowed(k, v)}
+    for key in ("SEREIN_VPN_ACTIVE", "SEREIN_VPN_ENDPOINT"):
+        if key in base:
+            environment[key] = base[key]
+    for key, value in (requested or {}).items():
+        if allowed(key, value):
+            environment[key] = value
+    return environment
+
+
+def log_file():
+    state = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+    directory = os.path.join(state, "serein")
+    try:
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "serein.log")
+        if os.path.exists(path) and os.path.getsize(path) > 5_000_000:
+            open(path, "w").close()
+        return open(path, "ab")
+    except OSError:
+        return subprocess.DEVNULL
+
+
+def check_executable(path):
+    if not os.path.isabs(path) or not os.path.isfile(path) or not os.access(path, os.X_OK):
+        raise SystemExit(f"serein-vpn-agent: not an executable file: {path}")
+    if os.path.basename(path) != "serein":
+        raise SystemExit("serein-vpn-agent: only the serein executable can be started")
+
+
+def peer_is_me(connection):
+    credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+    _, uid, _ = struct.unpack("3i", credentials)
+    return uid == os.getuid()
+
+
+def handle(connection, executable):
+    """Returns False when the agent should stop."""
+    if not peer_is_me(connection):
+        return True
+    data = b""
+    while b"\n" not in data and len(data) < MAX_REQUEST:
+        chunk = connection.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    try:
+        request = json.loads(data.split(b"\n", 1)[0])
+        if not isinstance(request, dict):
+            raise ValueError
+    except ValueError:
+        connection.sendall(b"error\n")
+        return True
+    if request.get("quit") is True:
+        connection.sendall(b"ok\n")
+        return False
+    if request.get("ping") is True:
+        connection.sendall(b"ok\n")
+        return True
+    environment = filter_env(request.get("env"), os.environ)
+    try:
+        subprocess.Popen(
+            [executable], env=environment, stdin=subprocess.DEVNULL, stdout=log_file(),
+            stderr=subprocess.STDOUT, start_new_session=True, close_fds=True,
+        )
+    except OSError:
+        connection.sendall(b"error\n")
+        return True
+    connection.sendall(b"ok\n")
+    return True
+
+
+def already_running(path):
+    probe = socket.socket(socket.AF_UNIX)
+    probe.settimeout(1)
+    try:
+        probe.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+def main(argv):
+    if len(argv) != 1:
+        raise SystemExit(__doc__)
+    executable = argv[0]
+    check_executable(executable)
+    path = socket_path()
+    if already_running(path):
+        return 0
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    server = socket.socket(socket.AF_UNIX)
+    old_mask = os.umask(0o177)
+    try:
+        server.bind(path)
+    finally:
+        os.umask(old_mask)
+    os.chmod(path, 0o600)
+    server.listen(8)
+    server.settimeout(5)
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    watch_tunnel = not os.environ.get("SEREIN_VPN_AGENT_NO_TUNNEL_CHECK")
+    try:
+        while True:
+            try:
+                connection, _ = server.accept()
+            except socket.timeout:
+                if watch_tunnel and not os.path.exists(f"/sys/class/net/{INTERFACE}"):
+                    return 0
+                continue
+            with connection:
+                connection.settimeout(5)
+                try:
+                    if not handle(connection, executable):
+                        return 0
+                except OSError:
+                    pass
+    finally:
+        server.close()
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

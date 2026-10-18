@@ -119,6 +119,8 @@ fn import_config(source: &std::path::Path) -> Outcome {
 	let Some(destination) = net_route::tunnel::config_path() else {
 		return Outcome::SaveFailed;
 	};
+	// A new configuration needs a new namespace: end the agent that serves the old one.
+	crate::vpn::stop_agent();
 	let summary = match net_route::tunnel::import(source, &destination) {
 		Ok(summary) => summary,
 		Err(error) => return Outcome::InvalidConfig(error.to_string()),
@@ -136,19 +138,35 @@ fn import_config(source: &std::path::Path) -> Outcome {
 	}
 }
 
-/// Authorises (administrator prompt) and builds the tunnel, then names the command that restarts
-/// Serein in the right place. Nothing is closed if permission is refused.
+/// Names the command that restarts Serein in the right place, asking for the administrator
+/// password first when that is needed. Nothing is closed if permission is refused.
 fn plan_restart() -> Outcome {
 	let Ok(exe) = std::env::current_exe() else {
 		return Outcome::SaveFailed;
 	};
 	let config = net_route::tunnel::config_path().filter(|path| path.is_file());
-	if config.is_none() && !crate::vpn::active() {
-		return Outcome::Relaunch(vec![exe.into_os_string()]);
-	}
-	match crate::vpn::authorize(config.as_deref()) {
-		Ok(()) => Outcome::Relaunch(crate::vpn::launch_args(config.as_deref(), &exe)),
-		Err(reason) => Outcome::TunnelFailed(reason),
+	match (config, crate::vpn::active()) {
+		(None, false) => Outcome::Relaunch(vec![exe.into_os_string()]),
+		// Leaving the tunnel: the new Serein must start outside the namespace.
+		(None, true) => match crate::vpn::authorize() {
+			Ok(()) => Outcome::Relaunch(crate::vpn::host_launch_args(&exe)),
+			Err(reason) => Outcome::TunnelFailed(reason),
+		},
+		// Entering (or staying in) the tunnel: the per-login agent starts the new Serein there, and
+		// asks for the password only if it is not running yet. A copy that is already inside the
+		// tunnel must not inherit that fact, or it would start where it is.
+		(Some(config), active) => match crate::vpn::ensure_agent(&config, &exe) {
+			Ok(()) if active => Outcome::Relaunch(vec![
+				"env".into(),
+				"-u".into(),
+				"SEREIN_VPN_ACTIVE".into(),
+				"-u".into(),
+				"SEREIN_VPN_ENDPOINT".into(),
+				exe.into_os_string(),
+			]),
+			Ok(()) => Outcome::Relaunch(vec![exe.into_os_string()]),
+			Err(reason) => Outcome::TunnelFailed(reason),
+		},
 	}
 }
 
@@ -221,6 +239,12 @@ impl Handler {
 				.map(|summary| summary.endpoint);
 			if form.tunnel.is_some() {
 				form.load(Mode::Wireguard, "", 0, false);
+			}
+			if form.tunnel.is_some()
+				&& !form.vpn_active
+				&& let Some(reason) = crate::vpn::startup_failure()
+			{
+				form.status = Status::TunnelFailed(reason);
 			}
 			// Running inside the tunnel without a configuration (or the reverse) needs a restart.
 			form.restart_needed = form.tunnel.is_some() != form.vpn_active;

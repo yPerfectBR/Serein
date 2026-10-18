@@ -11,8 +11,12 @@ computer keeps its normal connection.
 
 In **Settings → Network → WireGuard**, choose the `.conf` from your VPN provider (Serein validates it
 against an allow-list and keeps a private copy in `~/.config/serein/wireguard.conf`), then press
-**Restart Serein**. The system asks for the administrator password (polkit) to create the namespace;
-Serein itself never runs as root. Choose Direct (or another route) and restart to leave the tunnel.
+**Restart Serein**. The system asks for the administrator password (polkit) once per login, to start
+a small per-login agent (`serein-vpn-agent`, running as you, not as root) inside the tunnel's
+namespace. From then on every launch of Serein hands over to that agent, so it opens inside the
+tunnel without another prompt; the next login asks once again. If the tunnel cannot be entered
+(no helper, permission refused) Serein starts directly and the Network page says why. Serein itself
+never runs as root. Choose Direct (or another route) and restart to leave the tunnel.
 
 It needs `wireguard-tools`, `iproute2`, `polkit` and the `serein-vpn` helper
 (`packaging/linux/vpn`, installed to `/usr/local/libexec/serein-vpn`). The page offers to install

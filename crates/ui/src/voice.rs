@@ -3903,7 +3903,7 @@ impl MessagingUi {
 							let open = ui
 								.interact(
 									titles.response.rect,
-									egui::Id::new("voice-card-open-channel"),
+									titles.response.id.with("open"),
 									egui::Sense::click(),
 								)
 								.on_hover_cursor(egui::CursorIcon::PointingHand);
