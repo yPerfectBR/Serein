@@ -10,9 +10,11 @@ use tokio_tungstenite::tungstenite::Message;
 async fn main() {
 	let route = net_route::init();
 	println!("route: {}", route.describe());
-	let url = std::env::args()
-		.nth(1)
-		.unwrap_or_else(|| "wss://gateway.discord.gg/?v=10&encoding=json".into());
+	let first = std::env::args().nth(1);
+	if first.as_deref() == Some("--route-only") {
+		return;
+	}
+	let url = first.unwrap_or_else(|| "wss://gateway.discord.gg/?v=10&encoding=json".into());
 	let started = std::time::Instant::now();
 	let mut socket = match tokio::time::timeout(
 		Duration::from_secs(15),
