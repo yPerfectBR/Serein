@@ -81,6 +81,18 @@ fn main() -> eframe::Result {
 	net_route::init();
 	network_route::apply_saved_login();
 	vpn::enter_tunnel_at_startup();
+	vpn::log_line(&format!(
+		"[Serein] network route: {}",
+		if vpn::active() {
+			"WireGuard tunnel"
+		} else {
+			match net_route::state() {
+				net_route::State::Direct => "direct",
+				net_route::State::Proxy(_) => "proxy",
+				net_route::State::Invalid(_) => "invalid",
+			}
+		}
+	));
 	if let net_route::State::Invalid(reason) = net_route::state() {
 		eprintln!(
 			"Serein: {reason}. Network connections stay blocked until SEREIN_PROXY or ~/.config/serein/proxy is fixed or removed."

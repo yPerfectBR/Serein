@@ -865,15 +865,19 @@ impl MessagingUi {
 				.iter()
 				.find(|activity| matches!(activity.kind, 0..=3))
 		};
-		// Friends in voice, grouped by channel in roster order.
+		// Everyone in a voice channel that has at least one friend in it, in roster order.
 		let mut calls: Vec<(model::Id, model::Id, Vec<model::Id>)> = Vec::new();
+		let mut members: std::collections::HashMap<model::Id, &model::User> =
+			std::collections::HashMap::new();
 		if state.gateway_connected {
 			for entry in &state.voice.roster {
-				if state.friend(entry.participant.user).is_none()
-					|| !state.guilds.iter().any(|guild| guild.id == entry.guild)
+				if !state.guilds.iter().any(|guild| guild.id == entry.guild)
 					|| !state.can_view(entry.channel)
 				{
 					continue;
+				}
+				if let Some(member) = &entry.member {
+					members.insert(entry.participant.user, &member.user);
 				}
 				match calls
 					.iter_mut()
@@ -883,7 +887,11 @@ impl MessagingUi {
 					None => calls.push((entry.guild, entry.channel, vec![entry.participant.user])),
 				}
 			}
+			calls.retain(|(_, _, users)| users.iter().any(|id| state.friend(*id).is_some()));
 		}
+		let person = |id: model::Id| -> Option<&model::User> {
+			state.friend(id).or_else(|| members.get(&id).copied())
+		};
 		calls.truncate(ACTIVE_LIMIT);
 		let in_call: std::collections::HashSet<model::Id> = calls
 			.iter()
@@ -948,7 +956,7 @@ impl MessagingUi {
 							let shared = by_name.first().cloned();
 							let names: Vec<String> = users
 								.iter()
-								.filter_map(|id| state.friend(*id))
+								.filter_map(|id| person(*id))
 								.map(|user| state.user_display_name(user).to_owned())
 								.collect();
 							let sharing: Vec<model::Id> = shared
@@ -967,8 +975,7 @@ impl MessagingUi {
 								};
 								let row = active_row(ui, colors, false, |ui| {
 									ui.horizontal(|ui| {
-										if let Some(user) =
-											users.first().and_then(|id| state.friend(*id))
+										if let Some(user) = users.first().and_then(|id| person(*id))
 										{
 											let (status, _, _, clients) =
 												profiles::presence(state, user.id, None);
@@ -1036,8 +1043,8 @@ impl MessagingUi {
 									ui.set_min_width(240.0);
 									let activity = shared.as_ref().map_or("", |(name, _)| *name);
 									if let Some(chosen) = self.channel_menu(
-										ui, state, *guild_id, *channel, joined, users, activity,
-										&sharing,
+										ui, state, &members, *guild_id, *channel, joined, users,
+										activity, &sharing,
 									) {
 										action = Some(chosen);
 									}
@@ -1088,7 +1095,7 @@ impl MessagingUi {
 												}
 												ui.spacing_mut().item_spacing.x = -6.0;
 												for id in users.iter().take(ACTIVE_AVATARS).rev() {
-													if let Some(user) = state.friend(*id) {
+													if let Some(user) = person(*id) {
 														self.avatars
 															.show_plain(ui, user, 24.0, demo);
 													}
@@ -1139,7 +1146,7 @@ impl MessagingUi {
 									activity_of(**id).is_some_and(|a| a.details.is_some())
 								}) {
 									let (Some(user), Some(activity)) =
-										(state.friend(*id), activity_of(*id))
+										(person(*id), activity_of(*id))
 									else {
 										continue;
 									};
@@ -1227,6 +1234,7 @@ impl MessagingUi {
 										if let Some(chosen) = self.channel_menu(
 											ui,
 											state,
+											&members,
 											*guild_id,
 											*channel,
 											joined,
@@ -1345,6 +1353,7 @@ impl MessagingUi {
 		&mut self,
 		ui: &mut egui::Ui,
 		state: &State,
+		members: &std::collections::HashMap<model::Id, &model::User>,
 		guild: model::Id,
 		channel: model::Id,
 		joined: bool,
@@ -1391,7 +1400,7 @@ impl MessagingUi {
 			ui.separator();
 			ui.label(RichText::new(title).size(12.0).color(colors.muted));
 			for id in list {
-				let Some(user) = state.friend(*id) else {
+				let Some(user) = state.friend(*id).or_else(|| members.get(id).copied()) else {
 					continue;
 				};
 				ui.horizontal(|ui| {

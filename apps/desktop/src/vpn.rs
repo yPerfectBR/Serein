@@ -13,7 +13,7 @@ pub const HELPER: &str = "/usr/local/libexec/serein-vpn";
 pub const AGENT: &str = "/usr/local/libexec/serein-vpn-agent";
 const AGENT_SOCKET: &str = "serein-vpn-agent.sock";
 /// How long the password prompt may stay open before giving up.
-const AGENT_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+const AGENT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Why the last start-up attempt to enter the tunnel failed (shown on the Network page).
 static STARTUP_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -219,7 +219,7 @@ pub fn ensure_agent(config: &Path, exe: &Path) -> Result<(), String> {
 		std::thread::sleep(std::time::Duration::from_millis(200));
 	}
 	let _ = child.kill();
-	Err("timed out waiting for administrator permission".to_owned())
+	Err("no password prompt was answered in time; start the tunnel from a terminal with: serein-route vpn agent".to_owned())
 }
 #[cfg(not(unix))]
 pub fn ensure_agent(_: &Path, _: &Path) -> Result<(), String> {
@@ -253,6 +253,29 @@ pub fn request_spawn() -> Result<(), String> {
 	spawn_at(&socket)
 }
 
+/// Appends one line to `$XDG_STATE_HOME/serein/serein.log` (the file the launchers write to), so
+/// the route a session started with is on record even when it was started without redirection.
+pub fn log_line(line: &str) {
+	use std::io::Write;
+	let Some(base) = std::env::var_os("XDG_STATE_HOME")
+		.map(PathBuf::from)
+		.or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+	else {
+		return;
+	};
+	let dir = base.join("serein");
+	if std::fs::create_dir_all(&dir).is_err() {
+		return;
+	}
+	if let Ok(mut file) = std::fs::OpenOptions::new()
+		.create(true)
+		.append(true)
+		.open(dir.join("serein.log"))
+	{
+		let _ = writeln!(file, "{line}");
+	}
+}
+
 /// At startup, with a WireGuard configuration saved: hand over to a Serein that runs inside the
 /// tunnel (asking for the administrator password only if no agent exists yet for this login) and
 /// exit. If that fails, Serein keeps starting directly and the Network page says why.
@@ -278,6 +301,9 @@ pub fn enter_tunnel_at_startup() {
 		Ok(()) => std::process::exit(0),
 		Err(reason) => {
 			eprintln!("Serein: not entering the WireGuard tunnel: {reason}");
+			log_line(&format!(
+				"[Serein] not entering the WireGuard tunnel: {reason}"
+			));
 			if let Ok(mut failure) = STARTUP_FAILURE.lock() {
 				*failure = Some(reason);
 			}

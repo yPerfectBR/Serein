@@ -1390,6 +1390,9 @@ async fn run_stream_inner(
 						let mut event:Value=serde_json::from_str(&text).map_err(|_|"Invalid stream JSON")?;
 						if let Some(seq)=event["seq"].as_i64(){seq_ack=seq;}
 						let op=number(&event,"op")?;
+						if std::env::var_os("SEREIN_VOICE_DIAGNOSTICS").is_some_and(|set| set == "1") {
+							eprintln!("[Serein voice Stream] op={op}");
+						}
 						let data=&mut event["d"];
 						metrics.signal(Signal::Text,1);
 						metrics.signal(signal_of(op),1);
@@ -1441,7 +1444,12 @@ async fn run_stream_inner(
 						}
 					},
 					Message::Binary(bytes)=>{if bytes.len()<3{return Err("Truncated stream DAVE signaling");}seq_ack=i64::from(u16::from_be_bytes([bytes[0],bytes[1]]));metrics.signal(Signal::Binary,1);metrics.signal(match bytes[2]{25=>Signal::ExternalSender,27=>Signal::Proposals,29|30=>Signal::Commit,_=>Signal::Other},1);match bytes[2]{25=>dave.session.set_external_sender(&bytes[3..]).map_err(|_|"Stream DAVE external sender validation failed")?,27=>if let Some(response)=dave.proposals(&bytes[3..])?{send(&mut ws,Message::Binary(response.into())).await?;},29|30=>{announced=false;awaiting_keyframe=true;invalidate_stream(&mut video, &mut share_audio);match dave.group_changed(bytes[2],&bytes[3..]){Ok(id)=>if id!=0{json_send(&mut ws,json!({"op":23,"d":{"transition_id":id}})).await?;metrics.signal(Signal::TransitionReadySent,1);},Err(_)=>{if bytes.len()<5{return Err("Truncated stream DAVE transition");}let id=u16::from_be_bytes([bytes[3],bytes[4]]);json_send(&mut ws,json!({"op":31,"d":{"transition_id":id}})).await?;dave.reset()?;send(&mut ws,Message::Binary(dave.key_package()?.into())).await?;metrics.signal(Signal::KeyPackageSent,1);}}},_=>return Err("Unsupported stream DAVE opcode")}},
-					Message::Ping(data)=>send(&mut ws,Message::Pong(data)).await?, Message::Close(_)=>return Err("Discord stream connection closed"), _=>{}
+					Message::Ping(data)=>send(&mut ws,Message::Pong(data)).await?, Message::Close(frame)=>{
+						if std::env::var_os("SEREIN_VOICE_DIAGNOSTICS").is_some_and(|set| set == "1") {
+							eprintln!("[Serein voice Stream] closed code={:?}", frame.as_ref().map(|frame| u16::from(frame.code)));
+						}
+						return Err("Discord stream connection closed")
+					}, _=>{}
 				}
 			}
 		}
