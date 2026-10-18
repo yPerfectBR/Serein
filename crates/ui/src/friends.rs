@@ -811,10 +811,29 @@ impl MessagingUi {
 						}
 					});
 			});
-		if let Some(ui) = active_ui.as_mut()
-			&& let Some(user) = self.active_now(ui, state)
-		{
-			selected = Some(user);
+		if let Some(ui) = active_ui.as_mut() {
+			match self.active_now(ui, state) {
+				Some(ActiveAction::Message(user)) => selected = Some(user),
+				Some(ActiveAction::Channel(channel)) => {
+					let joined = state
+						.voice
+						.active
+						.as_ref()
+						.is_some_and(|call| call.channel == channel);
+					if !joined {
+						self.request_call(state, channel, false, commands);
+					}
+					if let Some(command) = state.select(channel) {
+						commands.push(command);
+					}
+				}
+				Some(ActiveAction::Server(guild)) => {
+					if let Some(command) = state.select_guild(guild) {
+						commands.push(command);
+					}
+				}
+				None => {}
+			}
 		}
 		if let Some(user) = selected
 			&& let Some(command) = state.open_friend_dm(user)
@@ -823,12 +842,12 @@ impl MessagingUi {
 		}
 	}
 
-	/// "Active Now": friends in a voice channel and friends with a game or music activity.
-	/// Returns the friend whose card was clicked.
-	fn active_now(&mut self, ui: &mut egui::Ui, state: &State) -> Option<model::Id> {
+	/// "Active Now": a card per voice channel that has friends in it (their shared activity, the
+	/// channel, and what each is doing) and a card per other friend with a game or music activity.
+	fn active_now(&mut self, ui: &mut egui::Ui, state: &State) -> Option<ActiveAction> {
 		let colors = design::palette(ui);
 		let language = self.language;
-		let mut clicked = None;
+		let mut action = None;
 		let rect = ui.max_rect();
 		ui.painter().vline(
 			rect.left(),
@@ -838,6 +857,12 @@ impl MessagingUi {
 		let now_ms = std::time::SystemTime::now()
 			.duration_since(std::time::UNIX_EPOCH)
 			.map_or(0, |elapsed| elapsed.as_millis() as u64);
+		let activity_of = |user: model::Id| -> Option<&model::RichActivity> {
+			profiles::presence(state, user, None)
+				.2
+				.iter()
+				.find(|activity| matches!(activity.kind, 0..=3))
+		};
 		// Friends in voice, grouped by channel in roster order.
 		let mut calls: Vec<(model::Id, model::Id, Vec<model::Id>)> = Vec::new();
 		if state.gateway_connected {
@@ -858,15 +883,14 @@ impl MessagingUi {
 			}
 		}
 		calls.truncate(ACTIVE_LIMIT);
+		let in_call: std::collections::HashSet<model::Id> = calls
+			.iter()
+			.flat_map(|(_, _, users)| users.iter().copied())
+			.collect();
 		let mut playing: Vec<(&model::User, &model::RichActivity)> = state
 			.friends()
-			.filter_map(|user| {
-				let (_, _, activities, _) = profiles::presence(state, user.id, None);
-				activities
-					.iter()
-					.find(|activity| matches!(activity.kind, 0..=3))
-					.map(|activity| (user, activity))
-			})
+			.filter(|user| !in_call.contains(&user.id))
+			.filter_map(|user| activity_of(user.id).map(|activity| (user, activity)))
 			.collect();
 		playing.sort_by(|a, b| {
 			b.1.started_at
@@ -895,109 +919,435 @@ impl MessagingUi {
 					.id_salt("active-now-scroll")
 					.auto_shrink([false, false])
 					.show(ui, |ui| {
-						ui.spacing_mut().item_spacing.y = 8.0;
+						ui.spacing_mut().item_spacing.y = 12.0;
 						for (guild, channel, users) in &calls {
-							let title = state.guild(*guild).map_or("", |guild| guild.name.as_str());
-							let name = state.channel(*channel).map_or("", |c| c.name.as_str());
-							let card = active_card(ui, colors.base, |ui| {
-								ui.horizontal(|ui| {
-									icons::inline(ui, Icon::InCall, 16.0, colors.positive);
-									ui.vertical(|ui| {
-										ui.spacing_mut().item_spacing.y = 0.0;
-										ui.add(
-											egui::Label::new(
-												design::semibold(ui, title, 14.0)
-													.color(colors.text_strong),
-											)
-											.truncate()
-											.selectable(false),
-										);
-										ui.add(
-											egui::Label::new(
-												RichText::new(name).size(12.0).color(colors.muted),
-											)
-											.truncate()
-											.selectable(false),
-										);
-									});
-								});
-								ui.horizontal(|ui| {
-									ui.spacing_mut().item_spacing.x = 4.0;
-									for id in users.iter().take(ACTIVE_AVATARS) {
-										if let Some(user) = state.friend(*id) {
-											self.avatars.show_plain(ui, user, 28.0, state.demo);
-										}
+							let guild_name =
+								state.guild(*guild).map_or("", |guild| guild.name.as_str());
+							let channel_name =
+								state.channel(*channel).map_or("", |c| c.name.as_str());
+							let joined = state
+								.voice
+								.active
+								.as_ref()
+								.is_some_and(|call| call.channel == *channel);
+							// The activity most members share, with who is doing it.
+							let mut by_name: Vec<(&str, Vec<model::Id>)> = Vec::new();
+							for id in users {
+								if let Some(activity) = activity_of(*id) {
+									match by_name
+										.iter_mut()
+										.find(|(name, _)| *name == activity.name)
+									{
+										Some((_, ids)) => ids.push(*id),
+										None => by_name.push((activity.name.as_str(), vec![*id])),
 									}
-									if users.len() > ACTIVE_AVATARS {
-										ui.label(
-											RichText::new(format!(
-												"+{}",
-												users.len() - ACTIVE_AVATARS
-											))
-											.size(12.0)
-											.color(colors.muted),
-										);
-									}
-								});
-							});
-							if card.clicked() {
-								clicked = users.first().copied();
+								}
 							}
-						}
-						for (user, activity) in &playing {
-							let card = active_card(ui, colors.base, |ui| {
-								ui.horizontal(|ui| {
-									self.avatars.show_plain(ui, user, 36.0, state.demo);
-									ui.vertical(|ui| {
-										ui.spacing_mut().item_spacing.y = 0.0;
-										ui.add(
-											egui::Label::new(
-												design::semibold(
-													ui,
-													state.user_display_name(user),
-													14.0,
-												)
-												.color(colors.text_strong),
-											)
-											.truncate()
-											.selectable(false),
-										);
-										let mut line = activity.summary();
-										if let Some(start) = activity.started_at {
-											line.push_str(&format!(
-												" \u{2013} {}",
-												elapsed_label(now_ms.saturating_sub(start))
-											));
+							by_name.sort_by_key(|(_, ids)| std::cmp::Reverse(ids.len()));
+							let shared = by_name.first().cloned();
+							active_group(ui, colors, |ui| {
+								let mut first = true;
+								if let Some((name, ids)) = &shared {
+									let names: Vec<String> = ids
+										.iter()
+										.filter_map(|id| state.friend(*id))
+										.map(|user| state.user_display_name(user).to_owned())
+										.collect();
+									let started = ids
+										.iter()
+										.filter_map(|id| activity_of(*id)?.started_at)
+										.min();
+									let row = active_row(ui, colors, !first, |ui| {
+										ui.horizontal(|ui| {
+											if let Some(user) =
+												ids.first().and_then(|id| state.friend(*id))
+											{
+												self.avatars.show_plain(ui, user, 36.0, state.demo);
+											}
+											ui.vertical(|ui| {
+												ui.spacing_mut().item_spacing.y = 0.0;
+												ui.add(
+													egui::Label::new(
+														design::semibold(
+															ui,
+															join_names(&names),
+															14.0,
+														)
+														.color(colors.text_strong),
+													)
+													.truncate()
+													.selectable(false),
+												);
+												ui.add(
+													egui::Label::new(
+														RichText::new(activity_line(
+															name, started, now_ms,
+														))
+														.size(12.0)
+														.color(colors.muted),
+													)
+													.truncate()
+													.selectable(false),
+												);
+											});
+											ui.with_layout(
+												egui::Layout::right_to_left(egui::Align::Center),
+												|ui| {
+													icons::inline(
+														ui,
+														activity_icon(name),
+														20.0,
+														colors.positive,
+													);
+												},
+											);
+										});
+									});
+									first = false;
+									egui::Popup::menu(&row).show(|ui| {
+										ui.set_min_width(240.0);
+										if let Some(chosen) = self.channel_menu(
+											ui, state, *guild, *channel, joined, users, name, ids,
+										) {
+											action = Some(chosen);
 										}
-										ui.add(
-											egui::Label::new(
-												RichText::new(line).size(12.0).color(colors.muted),
-											)
-											.truncate()
-											.selectable(false),
+									});
+								}
+								let row = active_row(ui, colors, !first, |ui| {
+									ui.horizontal(|ui| {
+										let (tile, _) = ui.allocate_exact_size(
+											egui::Vec2::splat(36.0),
+											egui::Sense::hover(),
 										);
-										if let Some(details) = &activity.details {
+										ui.painter().rect_filled(tile, 18, colors.hover);
+										icons::paint(
+											ui.painter(),
+											icons::Icon::InCall,
+											tile.shrink(9.0),
+											colors.positive,
+										);
+										ui.vertical(|ui| {
+											ui.spacing_mut().item_spacing.y = 0.0;
 											ui.add(
 												egui::Label::new(
-													RichText::new(details)
+													design::semibold(ui, guild_name, 14.0)
+														.color(colors.text_strong),
+												)
+												.truncate()
+												.selectable(false),
+											);
+											ui.add(
+												egui::Label::new(
+													RichText::new(channel_name)
 														.size(12.0)
 														.color(colors.muted),
 												)
 												.truncate()
 												.selectable(false),
 											);
-										}
+										});
+										ui.with_layout(
+											egui::Layout::right_to_left(egui::Align::Center),
+											|ui| {
+												if users.len() > ACTIVE_AVATARS {
+													ui.label(
+														RichText::new(format!(
+															"+{}",
+															users.len() - ACTIVE_AVATARS
+														))
+														.size(12.0)
+														.color(colors.muted),
+													);
+												}
+												ui.spacing_mut().item_spacing.x = -6.0;
+												for id in users.iter().take(ACTIVE_AVATARS).rev() {
+													if let Some(user) = state.friend(*id) {
+														self.avatars
+															.show_plain(ui, user, 24.0, state.demo);
+													}
+												}
+											},
+										);
 									});
 								});
+								if row.clicked() {
+									action = Some(ActiveAction::Channel(*channel));
+								}
+								// One more row per member whose activity has details (track, map…).
+								for id in users.iter().filter(|id| {
+									activity_of(**id).is_some_and(|a| a.details.is_some())
+								}) {
+									let (Some(user), Some(activity)) =
+										(state.friend(*id), activity_of(*id))
+									else {
+										continue;
+									};
+									let row = active_row(ui, colors, true, |ui| {
+										ui.horizontal(|ui| {
+											self.avatars.show_plain(ui, user, 36.0, state.demo);
+											ui.vertical(|ui| {
+												ui.spacing_mut().item_spacing.y = 0.0;
+												ui.add(
+													egui::Label::new(
+														design::semibold(
+															ui,
+															activity
+																.details
+																.as_deref()
+																.unwrap_or(""),
+															14.0,
+														)
+														.color(colors.text_strong),
+													)
+													.truncate()
+													.selectable(false),
+												);
+												if let Some(detail) = &activity.state {
+													ui.add(
+														egui::Label::new(
+															RichText::new(detail)
+																.size(12.0)
+																.color(colors.muted),
+														)
+														.truncate()
+														.selectable(false),
+													);
+												}
+											});
+										});
+									});
+									if row.clicked() {
+										action = Some(ActiveAction::Message(user.id));
+									}
+								}
 							});
-							if card.clicked() {
-								clicked = Some(user.id);
-							}
+						}
+						for (user, activity) in &playing {
+							let (status, _, _, clients) = profiles::presence(state, user.id, None);
+							let status = profiles::shown_status(state, user.id, status);
+							let started = activity.started_at;
+							active_group(ui, colors, |ui| {
+								let row = active_row(ui, colors, false, |ui| {
+									ui.horizontal(|ui| {
+										let avatar =
+											self.avatars.show_plain(ui, user, 36.0, state.demo);
+										if let Some(status) = status {
+											profiles::presence_badge(
+												ui,
+												avatar.rect,
+												status,
+												clients,
+												colors.base,
+											);
+										}
+										ui.vertical(|ui| {
+											ui.spacing_mut().item_spacing.y = 0.0;
+											ui.add(
+												egui::Label::new(
+													design::semibold(
+														ui,
+														state.user_display_name(user),
+														14.0,
+													)
+													.color(colors.text_strong),
+												)
+												.truncate()
+												.selectable(false),
+											);
+											ui.add(
+												egui::Label::new(
+													RichText::new(activity_line(
+														&activity.name,
+														started,
+														now_ms,
+													))
+													.size(12.0)
+													.color(colors.muted),
+												)
+												.truncate()
+												.selectable(false),
+											);
+										});
+										ui.with_layout(
+											egui::Layout::right_to_left(egui::Align::Center),
+											|ui| {
+												icons::inline(
+													ui,
+													activity_icon(&activity.name),
+													20.0,
+													colors.muted,
+												);
+											},
+										);
+									});
+								});
+								if row.clicked() {
+									action = Some(ActiveAction::Message(user.id));
+								}
+								if let Some(details) = &activity.details {
+									ui.label(RichText::new(details).size(12.0).color(colors.muted));
+								}
+							});
 						}
 					});
 			});
-		clicked
+		action
 	}
+
+	/// The menu behind a group's activity row: join or open the channel, go to its server, and who
+	/// shares the activity versus who else is in the channel.
+	#[allow(clippy::too_many_arguments)]
+	fn channel_menu(
+		&mut self,
+		ui: &mut egui::Ui,
+		state: &State,
+		guild: model::Id,
+		channel: model::Id,
+		joined: bool,
+		users: &[model::Id],
+		activity: &str,
+		sharing: &[model::Id],
+	) -> Option<ActiveAction> {
+		let colors = design::palette(ui);
+		let language = self.language;
+		let mut action = None;
+		if ui
+			.button(language.text(if joined {
+				"friends-active-open"
+			} else {
+				"friends-active-join"
+			}))
+			.clicked()
+		{
+			action = Some(ActiveAction::Channel(channel));
+			ui.close();
+		}
+		if ui.button(language.text("friends-active-server")).clicked() {
+			action = Some(ActiveAction::Server(guild));
+			ui.close();
+		}
+		let others: Vec<model::Id> = users
+			.iter()
+			.filter(|id| !sharing.contains(id))
+			.copied()
+			.collect();
+		for (title, list) in [
+			(format!("{activity} \u{2013} {}", sharing.len()), sharing),
+			(
+				crate::i18n::translate_args(
+					"friends-active-others",
+					&[("n", &others.len().to_string())],
+				),
+				&others[..],
+			),
+		] {
+			if list.is_empty() {
+				continue;
+			}
+			ui.separator();
+			ui.label(RichText::new(title).size(12.0).color(colors.muted));
+			for id in list {
+				let Some(user) = state.friend(*id) else {
+					continue;
+				};
+				ui.horizontal(|ui| {
+					self.avatars.show_plain(ui, user, 24.0, state.demo);
+					ui.label(
+						RichText::new(state.user_display_name(user)).color(colors.text_strong),
+					);
+				});
+			}
+		}
+		action
+	}
+}
+
+/// What a click in "Active Now" asks for.
+enum ActiveAction {
+	/// Open the conversation with a friend.
+	Message(model::Id),
+	/// Join this voice channel, or open its chat when already in it.
+	Channel(model::Id),
+	/// Go to a server.
+	Server(model::Id),
+}
+
+/// "Alex, Sam and 3 others".
+fn join_names(names: &[String]) -> String {
+	match names {
+		[] => String::new(),
+		[one] => one.clone(),
+		[a, b] => crate::i18n::translate_args("friends-active-two", &[("a", a), ("b", b)]),
+		[a, b, rest @ ..] => crate::i18n::translate_args(
+			"friends-active-many",
+			&[("a", a), ("b", b), ("n", &rest.len().to_string())],
+		),
+	}
+}
+
+/// "Spotify \u{2013} now", "ROBLOX \u{2013} 51m".
+fn activity_line(name: &str, started: Option<u64>, now_ms: u64) -> String {
+	match started.map(|start| now_ms.saturating_sub(start)) {
+		Some(elapsed) if elapsed >= 60_000 => format!("{name} \u{2013} {}", elapsed_label(elapsed)),
+		Some(_) => format!(
+			"{name} \u{2013} {}",
+			crate::i18n::translate("friends-active-just-now")
+		),
+		None => name.to_owned(),
+	}
+}
+
+fn activity_icon(name: &str) -> Icon {
+	if name.eq_ignore_ascii_case("spotify") {
+		Icon::Spotify
+	} else {
+		Icon::GameController
+	}
+}
+
+/// The rounded, bordered card that holds one or more rows.
+fn active_group(ui: &mut egui::Ui, colors: design::Palette, content: impl FnOnce(&mut egui::Ui)) {
+	egui::Frame::new()
+		.fill(colors.base)
+		.stroke(egui::Stroke::new(1.0, colors.border))
+		.corner_radius(12)
+		.show(ui, |ui| {
+			ui.set_width(ui.available_width());
+			ui.spacing_mut().item_spacing.y = 0.0;
+			content(ui);
+		});
+}
+
+/// A clickable row inside a card, highlighted on hover and divided from the row above.
+fn active_row(
+	ui: &mut egui::Ui,
+	colors: design::Palette,
+	divider: bool,
+	content: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
+	let background = ui.painter().add(egui::Shape::Noop);
+	let inner = egui::Frame::new()
+		.inner_margin(egui::Margin::symmetric(12, 10))
+		.show(ui, |ui| {
+			ui.set_width(ui.available_width());
+			content(ui);
+		});
+	let rect = inner.response.rect;
+	let response = ui
+		.interact(rect, inner.response.id.with("row"), egui::Sense::click())
+		.on_hover_cursor(egui::CursorIcon::PointingHand);
+	if response.hovered() {
+		ui.painter()
+			.set(background, egui::Shape::rect_filled(rect, 0, colors.hover));
+	}
+	if divider {
+		ui.painter().hline(
+			rect.x_range(),
+			rect.top(),
+			egui::Stroke::new(1.0, colors.border),
+		);
+	}
+	response
 }
 
 const ACTIVE_WIDTH: f32 = 340.0;
@@ -1005,30 +1355,6 @@ const ACTIVE_WIDTH: f32 = 340.0;
 const ACTIVE_MIN_WIDTH: f32 = 720.0;
 const ACTIVE_LIMIT: usize = 30;
 const ACTIVE_AVATARS: usize = 5;
-
-/// A rounded, clickable card for the "Active Now" column.
-fn active_card(
-	ui: &mut egui::Ui,
-	fill: Color32,
-	content: impl FnOnce(&mut egui::Ui),
-) -> egui::Response {
-	let response = egui::Frame::new()
-		.fill(fill)
-		.corner_radius(8)
-		.inner_margin(egui::Margin::symmetric(12, 10))
-		.show(ui, |ui| {
-			ui.set_width(ui.available_width());
-			ui.spacing_mut().item_spacing.y = 6.0;
-			content(ui);
-		})
-		.response;
-	ui.interact(
-		response.rect,
-		response.id.with("click"),
-		egui::Sense::click(),
-	)
-	.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
 
 /// "5m", "3h", "2d": the largest whole unit, like Discord's Active Now.
 fn elapsed_label(elapsed_ms: u64) -> String {
