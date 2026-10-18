@@ -1002,7 +1002,7 @@ impl MessagingUi {
 
 const ACTIVE_WIDTH: f32 = 340.0;
 /// The column only appears when the list keeps a comfortable width beside it.
-const ACTIVE_MIN_WIDTH: f32 = 900.0;
+const ACTIVE_MIN_WIDTH: f32 = 720.0;
 const ACTIVE_LIMIT: usize = 30;
 const ACTIVE_AVATARS: usize = 5;
 
