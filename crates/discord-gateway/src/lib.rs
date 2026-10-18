@@ -30,10 +30,7 @@ use tokio::{
 	sync::{Notify, mpsc, watch},
 	time::{Instant, interval_at, sleep, timeout},
 };
-use tokio_tungstenite::{
-	connect_async_with_config,
-	tungstenite::{Message as Frame, protocol::WebSocketConfig},
-};
+use tokio_tungstenite::tungstenite::{Message as Frame, protocol::WebSocketConfig};
 use zeroize::Zeroizing;
 
 /// Queues a redacted, user-copyable decode cause ahead of the fixed failure label.
@@ -1217,7 +1214,7 @@ async fn run_recoverable(
 		let Some(connection) = recoverable_wait(
 			timeout(
 				Duration::from_secs(15),
-				connect_async_with_config(url, Some(config), false),
+				net_route::connect_ws(url, Some(config)),
 			),
 			if was_ready { reconnect } else { None },
 		)
@@ -1226,7 +1223,7 @@ async fn run_recoverable(
 			skip_backoff = true;
 			continue;
 		};
-		let Ok(Ok((mut socket, _))) = connection else {
+		let Ok(Ok(mut socket)) = connection else {
 			state.failed();
 			attempt = next_attempt(attempt, None);
 			continue;

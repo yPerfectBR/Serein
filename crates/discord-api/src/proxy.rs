@@ -118,7 +118,8 @@ impl ApiProxy {
 	pub fn client_builder(&self, builder: ClientBuilder) -> Result<ClientBuilder, &'static str> {
 		self.validate()?;
 		Ok(match self {
-			Self::Direct => builder.no_proxy(),
+			// The process route (SEREIN_PROXY) applies only when no extension route is active.
+			Self::Direct => net_route::apply(builder.no_proxy()),
 			Self::Automatic => builder,
 			Self::Authenticated {
 				url,

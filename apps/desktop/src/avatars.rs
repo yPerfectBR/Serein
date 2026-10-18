@@ -1235,9 +1235,7 @@ async fn run(
 	control.publish(&disks);
 	let client = (!bundled_only)
 		.then(|| {
-			reqwest::Client::builder()
-				.https_only(true)
-				.no_proxy()
+			net_route::apply(reqwest::Client::builder().https_only(true).no_proxy())
 				.redirect(reqwest::redirect::Policy::none())
 				.timeout(Duration::from_secs(15))
 				.connect_timeout(Duration::from_secs(5))

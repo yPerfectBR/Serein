@@ -22,6 +22,7 @@ ui.workspace = true
 model.workspace = true
 client-core.workspace = true
 discord-api.workspace = true
+net-route.workspace = true
 discord-gateway.workspace = true
 discord-protocol.workspace = true
 test-support = { workspace = true, optional = true }

@@ -74,6 +74,13 @@ use zeroize::Zeroizing;
 /// Run explicit offline checks before native startup, or launch the configured desktop client.
 fn main() -> eframe::Result {
 	platform::memory::tune_allocator();
+	// Route gateway, voice signalling, REST and CDN traffic through SEREIN_PROXY (or the proxy file) before any
+	// connection exists. An invalid value blocks connections instead of falling back to direct.
+	if let net_route::State::Invalid(reason) = net_route::init() {
+		eprintln!(
+			"Serein: {reason}. Network connections stay blocked until SEREIN_PROXY or ~/.config/serein/proxy is fixed or removed."
+		);
+	}
 	#[cfg(all(debug_assertions, feature = "demo"))]
 	if std::env::args().any(|arg| arg == "--demo")
 		&& std::env::args().any(|arg| arg == "--demo-check-pr565")

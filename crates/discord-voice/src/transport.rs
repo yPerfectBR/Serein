@@ -321,9 +321,9 @@ async fn run_inner(
 		.max_frame_size(Some(MAX_SIGNAL))
 		.write_buffer_size(0)
 		.max_write_buffer_size(MAX_SIGNAL * 2);
-	let (mut ws, _) = timeout(
+	let mut ws = timeout(
 		Duration::from_secs(15),
-		tokio_tungstenite::connect_async_with_config(&url, Some(config), false),
+		net_route::connect_ws(&url, Some(config)),
 	)
 	.await
 	.map_err(|_| "Voice connection timed out")?
@@ -414,9 +414,9 @@ async fn run_inner(
 				.max_frame_size(Some(MAX_SIGNAL))
 				.write_buffer_size(0)
 				.max_write_buffer_size(MAX_SIGNAL * 2);
-			let (replacement, _) = timeout(
+			let replacement = timeout(
 				Duration::from_secs(15),
-				tokio_tungstenite::connect_async_with_config(&url, Some(config), false),
+				net_route::connect_ws(&url, Some(config)),
 			)
 			.await
 			.map_err(|_| "Voice resume timed out; rejoin the call")?
@@ -1106,9 +1106,9 @@ async fn run_stream_inner(
 		.max_frame_size(Some(MAX_SIGNAL))
 		.write_buffer_size(0)
 		.max_write_buffer_size(MAX_SIGNAL * 2);
-	let (mut ws, _) = timeout(
+	let mut ws = timeout(
 		Duration::from_secs(15),
-		tokio_tungstenite::connect_async_with_config(&url, Some(config), false),
+		net_route::connect_ws(&url, Some(config)),
 	)
 	.await
 	.map_err(|_| "Stream connection timed out")?

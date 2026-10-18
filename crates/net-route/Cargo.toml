@@ -1,0 +1,20 @@
+[package]
+name = "net-route"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = "0.22.1"
+percent-encoding = "2"
+reqwest = { workspace = true, features = ["socks"] }
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+
+[lints]
+workspace = true

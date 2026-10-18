@@ -1484,6 +1484,7 @@ dependencies = [
  "discord-protocol",
  "futures-util",
  "model",
+ "net-route",
  "reqwest",
  "serde",
  "serde_json",
@@ -1500,6 +1501,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "model",
+ "net-route",
  "serde",
  "serde_json",
  "tokio",
@@ -1541,6 +1543,7 @@ dependencies = [
  "libc",
  "libpulse-sys",
  "model",
+ "net-route",
  "nnnoiseless",
  "objc2 0.6.4",
  "objc2-av-foundation",
@@ -4072,6 +4075,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "net-route"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "futures-util",
+ "percent-encoding",
+ "reqwest",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6371,6 +6388,7 @@ dependencies = [
  "log",
  "md4",
  "model",
+ "net-route",
  "opus2",
  "platform",
  "png",

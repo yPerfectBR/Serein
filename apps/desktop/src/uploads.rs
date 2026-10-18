@@ -95,9 +95,7 @@ fn image_share_source(
 }
 
 async fn download_image_share(url: &str, cancelled: &AtomicBool) -> Result<Vec<u8>, &'static str> {
-	let client = reqwest::Client::builder()
-		.https_only(true)
-		.no_proxy()
+	let client = net_route::apply(reqwest::Client::builder().https_only(true).no_proxy())
 		.redirect(reqwest::redirect::Policy::none())
 		.timeout(std::time::Duration::from_secs(15))
 		.connect_timeout(std::time::Duration::from_secs(5))

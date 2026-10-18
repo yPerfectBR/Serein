@@ -8,6 +8,7 @@ license.workspace = true
 model.workspace = true
 client-core.workspace = true
 discord-protocol.workspace = true
+net-route.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true

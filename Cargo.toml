@@ -35,6 +35,7 @@ zeroize = "1.8"
 thiserror = "2"
 url = "2"
 platform = { path = "crates/platform" }
+net-route = { path = "crates/net-route" }
 local-store = { path = "crates/local-store" }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "cache"] }
 dirs = "=7.0.0"
