@@ -7607,6 +7607,7 @@ dependencies = [
  "fluent-templates",
  "image",
  "model",
+ "net-route",
  "pulldown-cmark",
  "ruzstd",
  "skrifa",

@@ -14,6 +14,7 @@ pub(super) struct Settings {
 	pub(super) notifications: crate::notification_settings::Navigation,
 	pub(super) messaging_permissions: crate::messaging_permissions::Navigation,
 	pub(super) games: crate::registered_games::Page,
+	pub(super) network: crate::network_route::Form,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -29,6 +30,8 @@ enum Page {
 	/// Discord's Registered Games: activity sharing, the current game and Added Games.
 	Activity,
 	Voice,
+	/// Proxy for the gateway, voice signalling, REST and CDN.
+	Network,
 	Keybinds,
 	/// Display language and clock style.
 	LanguageTime,
@@ -39,7 +42,7 @@ enum Page {
 }
 impl Page {
 	/// Every page in sidebar order; the narrow-window page picker lists them the same way.
-	const ALL: [Self; 15] = [
+	const ALL: [Self; 16] = [
 		Self::Account,
 		Self::Profile,
 		Self::MessagingPermissions,
@@ -48,6 +51,7 @@ impl Page {
 		Self::Chat,
 		Self::Notifications,
 		Self::Voice,
+		Self::Network,
 		Self::Keybinds,
 		Self::Activity,
 		Self::LanguageTime,
@@ -75,6 +79,7 @@ impl Page {
 				Self::Chat,
 				Self::Notifications,
 				Self::Voice,
+				Self::Network,
 				Self::Keybinds,
 				Self::Activity,
 				Self::LanguageTime,
@@ -96,6 +101,7 @@ impl Page {
 			Self::Notifications => "page-notifications",
 			Self::Activity => "page-registered-games",
 			Self::Voice => "page-voice",
+			Self::Network => "page-network",
 			Self::Keybinds => "page-keybinds",
 			Self::Storage => "page-storage",
 			Self::Updates => "page-updates",
@@ -118,6 +124,7 @@ impl Page {
 			Self::Notifications => "description-notifications",
 			Self::Activity => "description-registered-games",
 			Self::Voice => "description-voice",
+			Self::Network => "description-network",
 			Self::Keybinds => "description-keybinds",
 			Self::Storage => "description-storage",
 			Self::Updates => "description-updates",
@@ -152,6 +159,9 @@ impl Page {
 			}
 			Self::Voice => {
 				"voice video camera preview audio microphone speakers devices volume gain noise suppression push to talk"
+			}
+			Self::Network => {
+				"network proxy socks5 socks http connect tunnel vpn wireguard wireproxy route gateway rede privacy"
 			}
 			Self::LanguageTime => {
 				"language time clock 12 hour 24 hour am pm format locale translation"
@@ -189,6 +199,10 @@ fn gpu_description(language: Language, preference: model::GpuPreference) -> Stri
 }
 
 impl MessagingUi {
+	/// Host access to the Settings > Network form (requests in, status out).
+	pub fn network_route_form(&mut self) -> &mut crate::network_route::Form {
+		&mut self.settings.network
+	}
 	pub(super) fn open_extension_settings(&mut self, view: extensions::AppView) {
 		self.settings.page = match view {
 			extensions::AppView::Settings => Page::General,
@@ -293,6 +307,23 @@ impl MessagingUi {
 	/// Fixture-only entry point for the native offline settings preview.
 	pub fn preview_settings(&mut self, page: &str) {
 		self.settings.open = true;
+		// `network-socks5`, `network-http` and `network-saved` open Network in that state.
+		let page = if let Some(state) = page.strip_prefix("network-") {
+			use crate::network_route::{Mode, Status};
+			let (mode, status, login) = match state {
+				"http" => (
+					Mode::Http,
+					Status::TestFailed("connection refused".into()),
+					true,
+				),
+				"saved" => (Mode::Socks5, Status::Saved, false),
+				_ => (Mode::Socks5, Status::TestOk(184), false),
+			};
+			self.settings.network.preview(mode, status, login);
+			"network"
+		} else {
+			page
+		};
 		// A label wins; keywords still reach pages that were merged or renamed ("activity").
 		if let Some(page) = Page::ALL
 			.into_iter()
@@ -480,6 +511,7 @@ impl MessagingUi {
 										state.voice.active.is_some(),
 										false,
 									),
+									Page::Network => self.settings.network.show(ui, state.demo),
 									Page::Storage => self.storage_page(ui, state),
 									Page::Updates => self.update_settings(ui, state.demo),
 									Page::Keybinds => crate::keybinds::show(

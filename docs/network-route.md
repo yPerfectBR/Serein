@@ -1,5 +1,12 @@
 # Network route (proxy)
 
+**Settings → Network** configures this from the app: choose Direct, SOCKS5 or HTTP, enter the
+address and port, optionally a login, then **Save** (and **Test connection**, which opens the Discord
+gateway through the candidate route without signing in). The route is read when Serein starts, so the
+page offers **Restart Serein** after a change. The login is kept in the OS credential store and only
+used for the endpoint it was saved for; the file below never holds it (it carries a
+`# credentials: keyring` marker instead). `SEREIN_PROXY`, when set, overrides the page, which then says so.
+
 Serein can send its Discord traffic through a SOCKS5 or HTTP proxy. Set `SEREIN_PROXY` before
 starting the app, or put the same URL on one line in `$XDG_CONFIG_HOME/serein/proxy`
 (`~/.config/serein/proxy`). The environment variable wins over the file.

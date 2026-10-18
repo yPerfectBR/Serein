@@ -32,6 +32,7 @@ mod gpu;
 mod gpu_video;
 mod group_icon;
 mod interaction_uploads;
+mod network_route;
 mod notification_runtime;
 mod notification_sounds;
 #[cfg(feature = "demo")]
@@ -76,7 +77,9 @@ fn main() -> eframe::Result {
 	platform::memory::tune_allocator();
 	// Route gateway, voice signalling, REST and CDN traffic through SEREIN_PROXY (or the proxy file) before any
 	// connection exists. An invalid value blocks connections instead of falling back to direct.
-	if let net_route::State::Invalid(reason) = net_route::init() {
+	net_route::init();
+	network_route::apply_saved_login();
+	if let net_route::State::Invalid(reason) = net_route::state() {
 		eprintln!(
 			"Serein: {reason}. Network connections stay blocked until SEREIN_PROXY or ~/.config/serein/proxy is fixed or removed."
 		);
@@ -960,6 +963,7 @@ impl SessionEnd {
 }
 struct Desktop {
 	proxy_auth: proxy_auth::Authentication,
+	network_route: network_route::Handler,
 	api_proxy: tokio::sync::watch::Sender<Option<discord_api::proxy::ApiProxy>>,
 	extensions: extension_bridge::Bridge,
 	extension_close_pending: bool,
@@ -2289,6 +2293,7 @@ impl Desktop {
 		};
 		Ok(Self {
 			proxy_auth: proxy_auth::Authentication::default(),
+			network_route: network_route::Handler::default(),
 			api_proxy: tokio::sync::watch::channel(None).0,
 			extensions: extension_bridge::Bridge::default(),
 			extension_close_pending: false,
@@ -5405,6 +5410,12 @@ impl eframe::App for Desktop {
 				}
 			});
 		}
+		self.network_route.tick(
+			self.messaging.network_route_form(),
+			&self.runtime,
+			ctx,
+			self.fixture_only,
+		);
 		self.sync_customization(ctx);
 		#[cfg(feature = "demo")]
 		if self.demo_typing

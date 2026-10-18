@@ -544,3 +544,129 @@ fn describe_never_contains_credentials() {
 	assert_eq!(State::Direct.describe(), "direct");
 	assert!(State::parse(Some("bad")).describe().starts_with("invalid:"));
 }
+
+#[test]
+fn proxy_new_validates_fields_and_endpoint_hides_credentials() {
+	let proxy = Proxy::new(Kind::Socks5, " 127.0.0.1 ", 1080, Some(("bob", "p:ss"))).unwrap();
+	assert_eq!(proxy.endpoint(), "socks5://127.0.0.1:1080");
+	assert!(proxy.has_credentials());
+	let v6 = Proxy::new(Kind::HttpConnect, "[::1]", 8080, None).unwrap();
+	assert_eq!(
+		(v6.host(), v6.endpoint().as_str()),
+		("::1", "http://[::1]:8080")
+	);
+	for (host, port) in [
+		("", 1080),
+		("a b", 1080),
+		("h/x", 1080),
+		("u@h", 1080),
+		("h", 0),
+		("h\nx", 1),
+	] {
+		assert!(
+			Proxy::new(Kind::Socks5, host, port, None).is_err(),
+			"{host:?}:{port}"
+		);
+	}
+	assert!(Proxy::new(Kind::Socks5, &"h".repeat(254), 1, None).is_err());
+	assert!(Proxy::new(Kind::Socks5, "h", 1, Some(("", "x"))).is_err());
+	assert!(Proxy::new(Kind::Socks5, "h", 1, Some(("a:b", "x"))).is_err());
+	let base = Proxy::new(Kind::Socks5, "h", 1, None).unwrap();
+	assert!(base.with_credentials("u", "p").unwrap().has_credentials());
+	assert_eq!(
+		base.with_credentials("u", "p").unwrap().endpoint(),
+		base.endpoint()
+	);
+}
+
+#[test]
+fn config_file_is_private_atomic_and_never_stores_credentials() {
+	let dir = std::env::temp_dir().join(format!("net-route-file-{}", std::process::id()));
+	let _ = std::fs::remove_dir_all(&dir);
+	let path = dir.join("serein").join("proxy");
+	let proxy = Proxy::new(Kind::Socks5, "127.0.0.1", 1080, Some(("bob", "secret"))).unwrap();
+
+	write_config_file_at(&path, Some(&proxy), true).unwrap();
+	let contents = std::fs::read_to_string(&path).unwrap();
+	assert!(
+		!contents.contains("bob") && !contents.contains("secret"),
+		"{contents}"
+	);
+	assert!(contents.lines().any(|line| line.trim() == KEYRING_MARKER));
+	assert!(
+		!path.parent().unwrap().join(".proxy.tmp").exists(),
+		"temporary file is renamed away"
+	);
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt;
+		assert_eq!(
+			std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+			0o600
+		);
+		assert_eq!(
+			std::fs::metadata(path.parent().unwrap())
+				.unwrap()
+				.permissions()
+				.mode() & 0o777,
+			0o700
+		);
+	}
+	// The reader accepts exactly what the writer produced.
+	let state = State::from_file_contents(&contents, Some(0o600));
+	assert!(
+		matches!(&state, State::Proxy(p) if p.endpoint() == "socks5://127.0.0.1:1080" && !p.has_credentials())
+	);
+
+	// Replacing keeps the file private and drops the marker when credentials are not stored.
+	let other = Proxy::new(Kind::HttpConnect, "proxy.example", 8080, None).unwrap();
+	write_config_file_at(&path, Some(&other), false).unwrap();
+	let contents = std::fs::read_to_string(&path).unwrap();
+	assert!(contents.contains("http://proxy.example:8080") && !contents.contains(KEYRING_MARKER));
+
+	// Removing the route deletes the file and is idempotent.
+	write_config_file_at(&path, None, false).unwrap();
+	assert!(!path.exists());
+	write_config_file_at(&path, None, false).unwrap();
+	let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn candidate_routes_can_be_tested_without_changing_the_process_route() {
+	let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let echo_addr = echo.local_addr().unwrap();
+	tokio::spawn(async move {
+		let (tcp, _) = echo.accept().await.unwrap();
+		let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+		let _ = ws.send(Message::Text("hello".into())).await;
+	});
+	let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+	let port = spawn_socks_proxy(log.clone(), echo_addr.to_string()).await;
+	let candidate = State::Proxy(Proxy::new(Kind::Socks5, "127.0.0.1", port, None).unwrap());
+	let mut socket = connect_ws_with(&candidate, "ws://candidate.example.invalid:80/", None)
+		.await
+		.unwrap();
+	assert!(matches!(socket.next().await, Some(Ok(Message::Text(ref t))) if t.as_str() == "hello"));
+	assert_eq!(
+		log.lock().unwrap().as_slice(),
+		["candidate.example.invalid:80"]
+	);
+	// A candidate that is itself invalid fails closed without any network access.
+	let error = connect_ws_with(&State::Invalid("nope"), "ws://127.0.0.1:1/", None)
+		.await
+		.unwrap_err();
+	assert!(error.to_string().contains("nope"));
+}
+
+#[tokio::test]
+async fn gateway_probe_reports_success_and_failures_without_credentials() {
+	// A local "gateway": a plain TCP server cannot speak wss, so test the failure mapping here and
+	// the success path against the real gateway in the example run.
+	let state = State::Proxy(Proxy::new(Kind::Socks5, "127.0.0.1", 1, None).unwrap());
+	let error = probe_gateway(&state).await.unwrap_err();
+	assert!(!error.is_empty() && error.len() <= 160, "{error}");
+	let invalid = probe_gateway(&State::Invalid("Proxy URL rejected: test"))
+		.await
+		.unwrap_err();
+	assert!(invalid.contains("Proxy URL rejected"), "{invalid}");
+}

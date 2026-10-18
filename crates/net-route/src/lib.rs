@@ -69,6 +69,62 @@ impl PartialEq for Proxy {
 impl Eq for Proxy {}
 
 impl Proxy {
+	/// Builds a proxy from separate fields, validating them like [`Proxy::parse`].
+	pub fn new(
+		kind: Kind,
+		host: &str,
+		port: u16,
+		credentials: Option<(&str, &str)>,
+	) -> Result<Self, &'static str> {
+		const REJECTED: &str = "Proxy address rejected";
+		let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+		if host.is_empty()
+			|| host.len() > 253
+			|| port == 0
+			|| host.chars().any(|c| {
+				c.is_control() || c.is_whitespace() || matches!(c, '/' | '@' | '\\' | '?' | '#')
+			}) {
+			return Err(REJECTED);
+		}
+		let auth = match credentials {
+			None => None,
+			Some((user, pass)) => {
+				if user.is_empty()
+					|| user.len() > MAX_CREDENTIAL
+					|| pass.len() > MAX_CREDENTIAL
+					|| user.contains(':')
+					|| user.chars().chain(pass.chars()).any(char::is_control)
+				{
+					return Err("Proxy credentials rejected");
+				}
+				Some(Arc::new((
+					Zeroizing::new(user.into()),
+					Zeroizing::new(pass.into()),
+				)))
+			}
+		};
+		Ok(Self {
+			kind,
+			host: host.to_owned(),
+			port,
+			auth,
+		})
+	}
+
+	/// The same proxy with credentials attached (used when they come from the OS credential store).
+	pub fn with_credentials(&self, user: &str, pass: &str) -> Result<Self, &'static str> {
+		Self::new(self.kind, &self.host, self.port, Some((user, pass)))
+	}
+
+	/// `socks5://host:port` or `http://host:port`, never including credentials.
+	pub fn endpoint(&self) -> String {
+		let scheme = match self.kind {
+			Kind::Socks5 => "socks5",
+			Kind::HttpConnect => "http",
+		};
+		format!("{scheme}://{}:{}", self.host_for_url(), self.port)
+	}
+
 	pub fn kind(&self) -> Kind {
 		self.kind
 	}
@@ -264,13 +320,91 @@ pub fn init() -> State {
 			#[cfg(not(unix))]
 			let mode = None;
 			match std::fs::read_to_string(&path) {
-				Ok(contents) => State::from_file_contents(&contents, mode),
+				Ok(contents) => {
+					KEYRING_WANTED.store(
+						contents.lines().any(|line| line.trim() == KEYRING_MARKER),
+						std::sync::atomic::Ordering::Relaxed,
+					);
+					State::from_file_contents(&contents, mode)
+				}
 				Err(_) => State::Invalid("Proxy file could not be read"),
 			}
 		}
 	};
 	set(resolved);
 	state()
+}
+
+/// Marker line: the proxy's username and password live in the OS credential store, not in the file.
+pub const KEYRING_MARKER: &str = "# credentials: keyring";
+static KEYRING_WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True when the proxy file asked for credentials from the OS credential store (set by [`init`]).
+pub fn keyring_credentials_wanted() -> bool {
+	KEYRING_WANTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// True when `SEREIN_PROXY` is set, which overrides the proxy file and the settings page.
+pub fn env_overrides() -> bool {
+	std::env::var_os(ENV).is_some()
+}
+
+/// Writes the proxy file (private directory and file, replaced atomically). The file never holds
+/// credentials: with `keyring` set it carries [`KEYRING_MARKER`] so the app loads them from the OS
+/// credential store. `None` removes the file (direct connection).
+pub fn write_config_file(proxy: Option<&Proxy>, keyring: bool) -> IoResult<()> {
+	let path = config_file()
+		.ok_or_else(|| Error::new(ErrorKind::NotFound, "no configuration directory"))?;
+	write_config_file_at(&path, proxy, keyring)
+}
+
+/// [`write_config_file`] for an explicit path.
+pub fn write_config_file_at(
+	path: &std::path::Path,
+	proxy: Option<&Proxy>,
+	keyring: bool,
+) -> IoResult<()> {
+	let Some(proxy) = proxy else {
+		return match std::fs::remove_file(path) {
+			Err(error) if error.kind() != ErrorKind::NotFound => Err(error),
+			_ => Ok(()),
+		};
+	};
+	let dir = path
+		.parent()
+		.ok_or_else(|| Error::new(ErrorKind::NotFound, "no configuration directory"))?;
+	std::fs::create_dir_all(dir)?;
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt;
+		std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+	}
+	let mut contents = String::from("# Serein network route (written by Settings > Network)\n");
+	contents.push_str(&proxy.endpoint());
+	contents.push('\n');
+	if keyring {
+		contents.push_str(KEYRING_MARKER);
+		contents.push('\n');
+	}
+	let temporary = dir.join(".proxy.tmp");
+	{
+		use std::io::Write;
+		#[cfg(unix)]
+		let mut file = {
+			use std::os::unix::fs::OpenOptionsExt;
+			std::fs::OpenOptions::new()
+				.write(true)
+				.create(true)
+				.truncate(true)
+				.mode(0o600)
+				.open(&temporary)?
+		};
+		#[cfg(not(unix))]
+		let mut file = std::fs::File::create(&temporary)?;
+		file.write_all(contents.as_bytes())?;
+		file.sync_all()?;
+	}
+	std::fs::rename(&temporary, path)
 }
 
 static ROUTE: RwLock<State> = RwLock::new(State::Direct);
@@ -345,7 +479,16 @@ pub async fn connect_ws(
 	url: &str,
 	config: Option<WebSocketConfig>,
 ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, WsError> {
-	let proxy = match state() {
+	connect_ws_with(&state(), url, config).await
+}
+
+/// Like [`connect_ws`] for an explicit route, so a candidate setting can be tested before it is saved.
+pub async fn connect_ws_with(
+	route: &State,
+	url: &str,
+	config: Option<WebSocketConfig>,
+) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, WsError> {
+	let proxy = match route.clone() {
 		State::Direct => {
 			return connect_async_with_config(url, config, false)
 				.await
@@ -374,6 +517,35 @@ pub async fn connect_ws(
 	client_async_tls_with_config(request, stream, config, None)
 		.await
 		.map(|(socket, _)| socket)
+}
+
+/// Where [`probe_gateway`] connects.
+pub const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
+
+/// Opens the Discord gateway through `route` and waits for its first frame (opcode 10, Hello).
+/// It sends no credentials and signs in to nothing. Returns the time to the Hello frame.
+pub async fn probe_gateway(route: &State) -> Result<std::time::Duration, String> {
+	use futures_util::StreamExt;
+	use std::time::Duration;
+	use tokio_tungstenite::tungstenite::Message;
+
+	let started = std::time::Instant::now();
+	let short =
+		|text: String| -> String { text.chars().filter(|c| !c.is_control()).take(160).collect() };
+	let mut socket = tokio::time::timeout(
+		Duration::from_secs(15),
+		connect_ws_with(route, GATEWAY_URL, None),
+	)
+	.await
+	.map_err(|_| "timed out".to_owned())?
+	.map_err(|error| short(error.to_string()))?;
+	match tokio::time::timeout(Duration::from_secs(10), socket.next()).await {
+		Ok(Some(Ok(Message::Text(text)))) if text.contains("\"op\":10") => Ok(started.elapsed()),
+		Ok(Some(Ok(_))) => Err("unexpected first frame".to_owned()),
+		Ok(Some(Err(error))) => Err(short(error.to_string())),
+		Ok(None) => Err("closed before the first frame".to_owned()),
+		Err(_) => Err("no answer from the gateway".to_owned()),
+	}
 }
 
 type Credentials = (Zeroizing<String>, Zeroizing<String>);
