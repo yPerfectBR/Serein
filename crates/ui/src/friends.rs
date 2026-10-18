@@ -494,6 +494,32 @@ impl MessagingUi {
 		}
 		let voice_users = profiles::voice_users(state);
 		let mut selected = None;
+		// Wide windows get Discord's "Active Now" column beside the list.
+		let area = ui.available_rect_before_wrap();
+		let show_active =
+			matches!(self.friends.tab, Tab::Online | Tab::All) && area.width() >= ACTIVE_MIN_WIDTH;
+		let (list_area, active_area) = if show_active {
+			let (list, active) = area.split_left_right_at_x(area.right() - ACTIVE_WIDTH);
+			(list, Some(active))
+		} else {
+			(area, None)
+		};
+		ui.allocate_rect(area, egui::Sense::hover());
+		let mut active_ui = active_area.map(|rect| {
+			ui.new_child(
+				egui::UiBuilder::new()
+					.id_salt("friends-active-now")
+					.max_rect(rect)
+					.layout(egui::Layout::top_down(egui::Align::Min)),
+			)
+		});
+		let mut list_ui = ui.new_child(
+			egui::UiBuilder::new()
+				.id_salt("friends-list-column")
+				.max_rect(list_area)
+				.layout(egui::Layout::top_down(egui::Align::Min)),
+		);
+		let ui = &mut list_ui;
 		egui::Frame::new()
 			.inner_margin(egui::Margin::symmetric(24, 16))
 			.show(ui, |ui| {
@@ -785,11 +811,233 @@ impl MessagingUi {
 						}
 					});
 			});
+		if let Some(ui) = active_ui.as_mut()
+			&& let Some(user) = self.active_now(ui, state)
+		{
+			selected = Some(user);
+		}
 		if let Some(user) = selected
 			&& let Some(command) = state.open_friend_dm(user)
 		{
 			commands.push(command);
 		}
+	}
+
+	/// "Active Now": friends in a voice channel and friends with a game or music activity.
+	/// Returns the friend whose card was clicked.
+	fn active_now(&mut self, ui: &mut egui::Ui, state: &State) -> Option<model::Id> {
+		let colors = design::palette(ui);
+		let language = self.language;
+		let mut clicked = None;
+		let rect = ui.max_rect();
+		ui.painter().vline(
+			rect.left(),
+			rect.y_range(),
+			egui::Stroke::new(1.0, colors.border),
+		);
+		let now_ms = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.map_or(0, |elapsed| elapsed.as_millis() as u64);
+		// Friends in voice, grouped by channel in roster order.
+		let mut calls: Vec<(model::Id, model::Id, Vec<model::Id>)> = Vec::new();
+		if state.gateway_connected {
+			for entry in &state.voice.roster {
+				if state.friend(entry.participant.user).is_none()
+					|| !state.guilds.iter().any(|guild| guild.id == entry.guild)
+					|| !state.can_view(entry.channel)
+				{
+					continue;
+				}
+				match calls
+					.iter_mut()
+					.find(|(_, channel, _)| *channel == entry.channel)
+				{
+					Some((_, _, users)) => users.push(entry.participant.user),
+					None => calls.push((entry.guild, entry.channel, vec![entry.participant.user])),
+				}
+			}
+		}
+		calls.truncate(ACTIVE_LIMIT);
+		let mut playing: Vec<(&model::User, &model::RichActivity)> = state
+			.friends()
+			.filter_map(|user| {
+				let (_, _, activities, _) = profiles::presence(state, user.id, None);
+				activities
+					.iter()
+					.find(|activity| matches!(activity.kind, 0..=3))
+					.map(|activity| (user, activity))
+			})
+			.collect();
+		playing.sort_by(|a, b| {
+			b.1.started_at
+				.cmp(&a.1.started_at)
+				.then(a.0.name.cmp(&b.0.name))
+		});
+		playing.truncate(ACTIVE_LIMIT);
+		egui::Frame::new()
+			.inner_margin(egui::Margin::symmetric(16, 16))
+			.show(ui, |ui| {
+				ui.set_width(ui.available_width());
+				ui.label(
+					design::semibold(ui, language.text("friends-active-now"), 20.0)
+						.color(colors.text_strong),
+				);
+				ui.add_space(12.0);
+				if calls.is_empty() && playing.is_empty() {
+					ui.label(
+						RichText::new(language.text("friends-active-empty"))
+							.size(13.0)
+							.color(colors.muted),
+					);
+					return;
+				}
+				egui::ScrollArea::vertical()
+					.id_salt("active-now-scroll")
+					.auto_shrink([false, false])
+					.show(ui, |ui| {
+						ui.spacing_mut().item_spacing.y = 8.0;
+						for (guild, channel, users) in &calls {
+							let title = state.guild(*guild).map_or("", |guild| guild.name.as_str());
+							let name = state.channel(*channel).map_or("", |c| c.name.as_str());
+							let card = active_card(ui, colors.base, |ui| {
+								ui.horizontal(|ui| {
+									icons::inline(ui, Icon::InCall, 16.0, colors.positive);
+									ui.vertical(|ui| {
+										ui.spacing_mut().item_spacing.y = 0.0;
+										ui.add(
+											egui::Label::new(
+												design::semibold(ui, title, 14.0)
+													.color(colors.text_strong),
+											)
+											.truncate()
+											.selectable(false),
+										);
+										ui.add(
+											egui::Label::new(
+												RichText::new(name).size(12.0).color(colors.muted),
+											)
+											.truncate()
+											.selectable(false),
+										);
+									});
+								});
+								ui.horizontal(|ui| {
+									ui.spacing_mut().item_spacing.x = 4.0;
+									for id in users.iter().take(ACTIVE_AVATARS) {
+										if let Some(user) = state.friend(*id) {
+											self.avatars.show_plain(ui, user, 28.0, state.demo);
+										}
+									}
+									if users.len() > ACTIVE_AVATARS {
+										ui.label(
+											RichText::new(format!(
+												"+{}",
+												users.len() - ACTIVE_AVATARS
+											))
+											.size(12.0)
+											.color(colors.muted),
+										);
+									}
+								});
+							});
+							if card.clicked() {
+								clicked = users.first().copied();
+							}
+						}
+						for (user, activity) in &playing {
+							let card = active_card(ui, colors.base, |ui| {
+								ui.horizontal(|ui| {
+									self.avatars.show_plain(ui, user, 36.0, state.demo);
+									ui.vertical(|ui| {
+										ui.spacing_mut().item_spacing.y = 0.0;
+										ui.add(
+											egui::Label::new(
+												design::semibold(
+													ui,
+													state.user_display_name(user),
+													14.0,
+												)
+												.color(colors.text_strong),
+											)
+											.truncate()
+											.selectable(false),
+										);
+										let mut line = activity.summary();
+										if let Some(start) = activity.started_at {
+											line.push_str(&format!(
+												" \u{2013} {}",
+												elapsed_label(now_ms.saturating_sub(start))
+											));
+										}
+										ui.add(
+											egui::Label::new(
+												RichText::new(line).size(12.0).color(colors.muted),
+											)
+											.truncate()
+											.selectable(false),
+										);
+										if let Some(details) = &activity.details {
+											ui.add(
+												egui::Label::new(
+													RichText::new(details)
+														.size(12.0)
+														.color(colors.muted),
+												)
+												.truncate()
+												.selectable(false),
+											);
+										}
+									});
+								});
+							});
+							if card.clicked() {
+								clicked = Some(user.id);
+							}
+						}
+					});
+			});
+		clicked
+	}
+}
+
+const ACTIVE_WIDTH: f32 = 340.0;
+/// The column only appears when the list keeps a comfortable width beside it.
+const ACTIVE_MIN_WIDTH: f32 = 900.0;
+const ACTIVE_LIMIT: usize = 30;
+const ACTIVE_AVATARS: usize = 5;
+
+/// A rounded, clickable card for the "Active Now" column.
+fn active_card(
+	ui: &mut egui::Ui,
+	fill: Color32,
+	content: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
+	let response = egui::Frame::new()
+		.fill(fill)
+		.corner_radius(8)
+		.inner_margin(egui::Margin::symmetric(12, 10))
+		.show(ui, |ui| {
+			ui.set_width(ui.available_width());
+			ui.spacing_mut().item_spacing.y = 6.0;
+			content(ui);
+		})
+		.response;
+	ui.interact(
+		response.rect,
+		response.id.with("click"),
+		egui::Sense::click(),
+	)
+	.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// "5m", "3h", "2d": the largest whole unit, like Discord's Active Now.
+fn elapsed_label(elapsed_ms: u64) -> String {
+	let minutes = elapsed_ms / 60_000;
+	match minutes {
+		0 => "1m".to_owned(),
+		1..=59 => format!("{minutes}m"),
+		60..=1439 => format!("{}h", minutes / 60),
+		_ => format!("{}d", minutes / 1440),
 	}
 }
 
@@ -1027,6 +1275,26 @@ fn search(ui: &mut egui::Ui, query: &mut String, id: egui::Id, hint: &str) -> eg
 		egui::StrokeKind::Inside,
 	);
 	edit
+}
+
+#[cfg(test)]
+mod active_now_tests {
+	use super::elapsed_label;
+
+	#[test]
+	fn elapsed_time_uses_the_largest_whole_unit() {
+		for (ms, label) in [
+			(0, "1m"),
+			(59_000, "1m"),
+			(60_000 * 5, "5m"),
+			(60_000 * 59, "59m"),
+			(60_000 * 60, "1h"),
+			(60_000 * 60 * 23, "23h"),
+			(60_000 * 60 * 24 * 3, "3d"),
+		] {
+			assert_eq!(elapsed_label(ms), label, "{ms} ms");
+		}
+	}
 }
 
 #[cfg(test)]

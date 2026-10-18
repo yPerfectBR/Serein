@@ -3882,7 +3882,7 @@ impl MessagingUi {
 							commands.push(command);
 						}
 						ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-							ui.vertical(|ui| {
+							let titles = ui.vertical(|ui| {
 								ui.spacing_mut().item_spacing.y = 0.0;
 								ui.add(
 									egui::Label::new(
@@ -3899,6 +3899,20 @@ impl MessagingUi {
 									.selectable(false),
 								);
 							});
+							// Clicking the call's name opens that channel (its conversation).
+							let open = ui
+								.interact(
+									titles.response.rect,
+									egui::Id::new("voice-card-open-channel"),
+									egui::Sense::click(),
+								)
+								.on_hover_cursor(egui::CursorIcon::PointingHand);
+							if open.clicked()
+								&& !state.demo
+								&& let Some(command) = state.select(channel_id)
+							{
+								commands.push(command);
+							}
 						});
 					});
 				});
