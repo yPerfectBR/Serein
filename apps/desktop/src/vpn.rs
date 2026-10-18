@@ -62,6 +62,7 @@ fn forwarded(key: &str, value: &str) -> bool {
 		"MESA_",
 		"__GL",
 		"__EGL",
+		"GST_",
 		"__NV",
 		"__VK",
 		"DRI_",

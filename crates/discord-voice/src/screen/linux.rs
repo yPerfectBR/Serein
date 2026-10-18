@@ -125,6 +125,7 @@ pub(super) fn run(
 			let modes = Mode::order();
 			while let Some(&mode) = modes.get(mode_index) {
 				mode_index += 1;
+				note("encoder_try", mode.label());
 				if stop.load(Ordering::Acquire) || send.is_closed() {
 					return Ok(());
 				}
@@ -178,8 +179,10 @@ pub(super) fn run(
 					keyframe.clone(),
 					move || capacity.capacity() > 0,
 				) else {
+					note("capture_new_failed", mode.label());
 					continue;
 				};
+				note("pipeline_started", mode.label());
 				if let Ok(mut label) = status.lock() {
 					*label = "Starting screen capture…";
 				}

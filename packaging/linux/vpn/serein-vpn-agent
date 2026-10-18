@@ -25,7 +25,7 @@ INTERFACE = "wg-serein"
 MAX_REQUEST = 64 * 1024
 NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PREFIXES = (
-    "XDG_", "WAYLAND_", "DBUS_", "LC_", "GDK_", "GTK_", "QT_", "WGPU_", "VK_", "MESA_", "__GL", "__EGL",
+    "XDG_", "WAYLAND_", "DBUS_", "LC_", "GDK_", "GTK_", "QT_", "WGPU_", "VK_", "MESA_", "__GL", "__EGL", "GST_",
     "__NV", "__VK", "DRI_", "LIBVA_", "PULSE_", "PIPEWIRE_", "XCURSOR_", "RUST_", "SEREIN_",
 )
 NAMES = ("DISPLAY", "LANG", "LANGUAGE", "TERM", "SHELL", "HOME", "USER", "LOGNAME", "PATH")

@@ -29,11 +29,13 @@ impl Mode {
 		Self::NvidiaCopy,
 		Self::Software,
 	];
-	/// The order encoders are tried in. `SEREIN_SCREEN_ENCODER` (`nvidia`, `va` or `software`) moves
+	/// The order encoders are tried in. `SEREIN_SCREEN_ENCODER` (`nvidia`, `nvidia-copy`, `va` or `software`) moves
 	/// that family first, for example to use a dedicated GPU instead of the integrated one.
 	pub(super) fn order() -> Vec<Self> {
 		let first: &[Self] = match std::env::var("SEREIN_SCREEN_ENCODER").ok().as_deref() {
 			Some("nvidia") => &[Self::Nvidia, Self::NvidiaCopy],
+			// Skips the GL path, which needs the encoder and the compositor on one GPU.
+			Some("nvidia-copy") => &[Self::NvidiaCopy],
 			Some("va") => &[Self::Va, Self::VaLegacy],
 			Some("software") => &[Self::Software],
 			_ => &[],
