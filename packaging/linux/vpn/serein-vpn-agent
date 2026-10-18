@@ -56,6 +56,8 @@ def filter_env(requested, base):
     for key, value in (requested or {}).items():
         if allowed(key, value):
             environment[key] = value
+    # Privacy-safe voice diagnostics (counters and event names only) go to the log by default.
+    environment.setdefault("SEREIN_VOICE_DIAGNOSTICS", "1")
     return environment
 
 

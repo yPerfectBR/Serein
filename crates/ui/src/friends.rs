@@ -842,11 +842,13 @@ impl MessagingUi {
 		}
 	}
 
-	/// "Active Now": a card per voice channel that has friends in it (their shared activity, the
-	/// channel, and what each is doing) and a card per other friend with a game or music activity.
+	/// "Active Now": a card per voice channel that has friends in it (who is there and what they
+	/// share, the server and channel, and what each is playing or listening to) and a card per other
+	/// friend with a game or music activity, laid out like the official client.
 	fn active_now(&mut self, ui: &mut egui::Ui, state: &State) -> Option<ActiveAction> {
 		let colors = design::palette(ui);
 		let language = self.language;
+		let demo = state.demo;
 		let mut action = None;
 		let rect = ui.max_rect();
 		ui.painter().vline(
@@ -920,9 +922,8 @@ impl MessagingUi {
 					.auto_shrink([false, false])
 					.show(ui, |ui| {
 						ui.spacing_mut().item_spacing.y = 12.0;
-						for (guild, channel, users) in &calls {
-							let guild_name =
-								state.guild(*guild).map_or("", |guild| guild.name.as_str());
+						for (guild_id, channel, users) in &calls {
+							let guild = state.guild(*guild_id);
 							let channel_name =
 								state.channel(*channel).map_or("", |c| c.name.as_str());
 							let joined = state
@@ -945,120 +946,169 @@ impl MessagingUi {
 							}
 							by_name.sort_by_key(|(_, ids)| std::cmp::Reverse(ids.len()));
 							let shared = by_name.first().cloned();
+							let names: Vec<String> = users
+								.iter()
+								.filter_map(|id| state.friend(*id))
+								.map(|user| state.user_display_name(user).to_owned())
+								.collect();
+							let sharing: Vec<model::Id> = shared
+								.as_ref()
+								.map(|(_, ids)| ids.clone())
+								.unwrap_or_default();
 							active_group(ui, colors, |ui| {
-								let mut first = true;
-								if let Some((name, ids)) = &shared {
-									let names: Vec<String> = ids
-										.iter()
-										.filter_map(|id| state.friend(*id))
-										.map(|user| state.user_display_name(user).to_owned())
-										.collect();
-									let started = ids
-										.iter()
-										.filter_map(|id| activity_of(*id)?.started_at)
-										.min();
-									let row = active_row(ui, colors, !first, |ui| {
-										ui.horizontal(|ui| {
-											if let Some(user) =
-												ids.first().and_then(|id| state.friend(*id))
-											{
-												self.avatars.show_plain(ui, user, 36.0, state.demo);
-											}
-											ui.vertical(|ui| {
-												ui.spacing_mut().item_spacing.y = 0.0;
-												ui.add(
-													egui::Label::new(
-														design::semibold(
-															ui,
-															join_names(&names),
-															14.0,
-														)
-														.color(colors.text_strong),
-													)
-													.truncate()
-													.selectable(false),
-												);
-												ui.add(
-													egui::Label::new(
-														RichText::new(activity_line(
-															name, started, now_ms,
-														))
-														.size(12.0)
-														.color(colors.muted),
-													)
-													.truncate()
-													.selectable(false),
-												);
-											});
-											ui.with_layout(
-												egui::Layout::right_to_left(egui::Align::Center),
-												|ui| {
-													icons::inline(
-														ui,
-														activity_icon(name),
-														20.0,
-														colors.positive,
-													);
-												},
-											);
-										});
-									});
-									first = false;
-									egui::Popup::menu(&row).show(|ui| {
-										ui.set_min_width(240.0);
-										if let Some(chosen) = self.channel_menu(
-											ui, state, *guild, *channel, joined, users, name, ids,
-										) {
-											action = Some(chosen);
-										}
-									});
-								}
-								let row = active_row(ui, colors, !first, |ui| {
+								// Row 1: everyone in the channel, and the activity they share.
+								let started = sharing
+									.iter()
+									.filter_map(|id| activity_of(*id)?.started_at)
+									.min();
+								let line = match &shared {
+									Some((name, _)) => activity_line(name, started, now_ms),
+									None => crate::i18n::translate("friends-active-in-voice"),
+								};
+								let row = active_row(ui, colors, false, |ui| {
 									ui.horizontal(|ui| {
-										let (tile, _) = ui.allocate_exact_size(
-											egui::Vec2::splat(36.0),
-											egui::Sense::hover(),
-										);
-										ui.painter().rect_filled(tile, 18, colors.hover);
-										icons::paint(
-											ui.painter(),
-											icons::Icon::InCall,
-											tile.shrink(9.0),
-											colors.positive,
-										);
+										if let Some(user) =
+											users.first().and_then(|id| state.friend(*id))
+										{
+											let (status, _, _, clients) =
+												profiles::presence(state, user.id, None);
+											let status =
+												profiles::shown_status(state, user.id, status);
+											let avatar =
+												self.avatars.show_plain(ui, user, 36.0, demo);
+											if let Some(status) = status {
+												profiles::presence_badge(
+													ui,
+													avatar.rect,
+													status,
+													clients,
+													colors.base,
+												);
+											}
+										}
 										ui.with_layout(
 											egui::Layout::right_to_left(egui::Align::Center),
 											|ui| {
-												if users.len() > ACTIVE_AVATARS {
-													ui.label(
-														RichText::new(format!(
-															"+{}",
-															users.len() - ACTIVE_AVATARS
-														))
-														.size(12.0)
-														.color(colors.muted),
+												if let Some((name, _)) = &shared {
+													icons::inline(
+														ui,
+														activity_icon(name),
+														24.0,
+														colors.positive,
 													);
 												}
-												ui.spacing_mut().item_spacing.x = -6.0;
-												for id in users.iter().take(ACTIVE_AVATARS).rev() {
-													if let Some(user) = state.friend(*id) {
-														self.avatars
-															.show_plain(ui, user, 24.0, state.demo);
-													}
-												}
-												// What is left of the row, after the avatars, holds the names.
 												ui.with_layout(
 													egui::Layout::left_to_right(
 														egui::Align::Center,
 													),
 													|ui| {
-														ui.spacing_mut().item_spacing.x = 8.0;
 														ui.vertical(|ui| {
 															ui.spacing_mut().item_spacing.y = 0.0;
 															ui.add(
 																egui::Label::new(
 																	design::semibold(
-																		ui, guild_name, 14.0,
+																		ui,
+																		join_names(&names),
+																		14.0,
+																	)
+																	.color(colors.text_strong),
+																)
+																.truncate()
+																.selectable(false),
+															);
+															ui.add(
+																egui::Label::new(
+																	RichText::new(&line)
+																		.size(12.0)
+																		.color(colors.muted),
+																)
+																.truncate()
+																.selectable(false),
+															);
+														});
+													},
+												);
+											},
+										);
+									});
+								});
+								egui::Popup::menu(&row).show(|ui| {
+									ui.set_min_width(240.0);
+									let activity = shared.as_ref().map_or("", |(name, _)| *name);
+									if let Some(chosen) = self.channel_menu(
+										ui, state, *guild_id, *channel, joined, users, activity,
+										&sharing,
+									) {
+										action = Some(chosen);
+									}
+								});
+								// Row 2: the server and channel, with a few of the people in it.
+								let row = active_row(ui, colors, true, |ui| {
+									ui.horizontal(|ui| {
+										let (tile, _) = ui.allocate_exact_size(
+											egui::Vec2::splat(36.0),
+											egui::Sense::hover(),
+										);
+										if let Some(guild) = guild {
+											self.avatars.paint_guild(ui, guild, tile, demo, 18);
+										}
+										let corner = tile.right_bottom() - egui::vec2(4.0, 4.0);
+										ui.painter().circle_filled(corner, 9.0, colors.chat);
+										icons::paint(
+											ui.painter(),
+											icons::Icon::Speaker,
+											egui::Rect::from_center_size(
+												corner,
+												egui::Vec2::splat(12.0),
+											),
+											colors.text_strong,
+										);
+										ui.with_layout(
+											egui::Layout::right_to_left(egui::Align::Center),
+											|ui| {
+												if users.len() > ACTIVE_AVATARS {
+													egui::Frame::new()
+														.fill(colors.chat)
+														.corner_radius(12)
+														.inner_margin(egui::Margin::symmetric(8, 3))
+														.show(ui, |ui| {
+															ui.label(
+																design::semibold(
+																	ui,
+																	format!(
+																		"+{}",
+																		users.len()
+																			- ACTIVE_AVATARS
+																	),
+																	13.0,
+																)
+																.color(colors.text_strong),
+															);
+														});
+												}
+												ui.spacing_mut().item_spacing.x = -6.0;
+												for id in users.iter().take(ACTIVE_AVATARS).rev() {
+													if let Some(user) = state.friend(*id) {
+														self.avatars
+															.show_plain(ui, user, 28.0, demo);
+													}
+												}
+												ui.with_layout(
+													egui::Layout::left_to_right(
+														egui::Align::Center,
+													),
+													|ui| {
+														ui.spacing_mut().item_spacing.x = 10.0;
+														ui.vertical(|ui| {
+															ui.spacing_mut().item_spacing.y = 0.0;
+															ui.add(
+																egui::Label::new(
+																	design::semibold(
+																		ui,
+																		guild.map_or("", |g| {
+																			g.name.as_str()
+																		}),
+																		14.0,
 																	)
 																	.color(colors.text_strong),
 																)
@@ -1084,7 +1134,7 @@ impl MessagingUi {
 								if row.clicked() {
 									action = Some(ActiveAction::Channel(*channel));
 								}
-								// One more row per member whose activity has details (track, map…).
+								// One more row per member whose activity has details (the track, the map).
 								for id in users.iter().filter(|id| {
 									activity_of(**id).is_some_and(|a| a.details.is_some())
 								}) {
@@ -1093,55 +1143,110 @@ impl MessagingUi {
 									else {
 										continue;
 									};
+									let spotify = profiles::is_spotify(activity);
 									let row = active_row(ui, colors, true, |ui| {
 										ui.horizontal(|ui| {
-											self.avatars.show_plain(ui, user, 36.0, state.demo);
-											ui.vertical(|ui| {
-												ui.spacing_mut().item_spacing.y = 0.0;
-												ui.add(
-													egui::Label::new(
-														design::semibold(
-															ui,
-															activity
-																.details
-																.as_deref()
-																.unwrap_or(""),
-															14.0,
-														)
-														.color(colors.text_strong),
-													)
-													.truncate()
-													.selectable(false),
-												);
-												if let Some(detail) = &activity.state {
-													ui.add(
-														egui::Label::new(
-															RichText::new(detail)
-																.size(12.0)
-																.color(colors.muted),
-														)
-														.truncate()
-														.selectable(false),
+											let art = self.avatars.show_icon(
+												ui,
+												activity.image.as_ref().map(|image| image.key()),
+												36.0,
+												demo,
+												&activity.name,
+											);
+											let badge =
+												art.rect.right_bottom() - egui::vec2(4.0, 4.0);
+											ui.painter().circle_filled(badge, 9.0, colors.base);
+											icons::paint(
+												ui.painter(),
+												activity_icon(&activity.name),
+												egui::Rect::from_center_size(
+													badge,
+													egui::Vec2::splat(14.0),
+												),
+												if spotify {
+													colors.positive
+												} else {
+													colors.muted
+												},
+											);
+											ui.with_layout(
+												egui::Layout::right_to_left(egui::Align::Center),
+												|ui| {
+													self.avatars.show_plain(ui, user, 28.0, demo);
+													ui.with_layout(
+														egui::Layout::left_to_right(
+															egui::Align::Center,
+														),
+														|ui| {
+															ui.vertical(|ui| {
+																ui.spacing_mut().item_spacing.y =
+																	0.0;
+																ui.add(
+																	egui::Label::new(
+																		design::semibold(
+																			ui,
+																			activity
+																				.details
+																				.as_deref()
+																				.unwrap_or(
+																					&activity.name,
+																				),
+																			14.0,
+																		)
+																		.color(colors.text_strong),
+																	)
+																	.truncate()
+																	.selectable(false),
+																);
+																if let Some(detail) =
+																	&activity.state
+																{
+																	ui.add(
+																		egui::Label::new(
+																			RichText::new(
+																				detail.replace(
+																					"; ", ", ",
+																				),
+																			)
+																			.size(12.0)
+																			.color(colors.muted),
+																		)
+																		.truncate()
+																		.selectable(false),
+																	);
+																}
+															});
+														},
 													);
-												}
-											});
+												},
+											);
 										});
 									});
-									if row.clicked() {
-										action = Some(ActiveAction::Message(user.id));
-									}
+									egui::Popup::menu(&row).show(|ui| {
+										ui.set_min_width(240.0);
+										if let Some(chosen) = self.channel_menu(
+											ui,
+											state,
+											*guild_id,
+											*channel,
+											joined,
+											users,
+											&activity.name,
+											&[*id],
+										) {
+											action = Some(chosen);
+										}
+									});
 								}
 							});
 						}
 						for (user, activity) in &playing {
 							let (status, _, _, clients) = profiles::presence(state, user.id, None);
 							let status = profiles::shown_status(state, user.id, status);
-							let started = activity.started_at;
 							active_group(ui, colors, |ui| {
 								let row = active_row(ui, colors, false, |ui| {
 									ui.horizontal(|ui| {
-										let avatar =
-											self.avatars.show_plain(ui, user, 36.0, state.demo);
+										let avatar = self.avatars.show_plain(ui, user, 36.0, demo);
 										if let Some(status) = status {
 											profiles::presence_badge(
 												ui,
@@ -1151,53 +1256,73 @@ impl MessagingUi {
 												colors.base,
 											);
 										}
-										ui.vertical(|ui| {
-											ui.spacing_mut().item_spacing.y = 0.0;
-											ui.add(
-												egui::Label::new(
-													design::semibold(
-														ui,
-														state.user_display_name(user),
-														14.0,
-													)
-													.color(colors.text_strong),
-												)
-												.truncate()
-												.selectable(false),
-											);
-											ui.add(
-												egui::Label::new(
-													RichText::new(activity_line(
-														&activity.name,
-														started,
-														now_ms,
-													))
-													.size(12.0)
-													.color(colors.muted),
-												)
-												.truncate()
-												.selectable(false),
-											);
-											if let Some(details) = &activity.details {
-												ui.add(
-													egui::Label::new(
-														RichText::new(details)
-															.size(12.0)
-															.color(colors.muted),
-													)
-													.truncate()
-													.selectable(false),
-												);
-											}
-										});
 										ui.with_layout(
 											egui::Layout::right_to_left(egui::Align::Center),
 											|ui| {
-												icons::inline(
-													ui,
-													activity_icon(&activity.name),
-													20.0,
-													colors.muted,
+												if let Some(image) = &activity.image {
+													self.avatars.show_icon(
+														ui,
+														Some(image.key()),
+														32.0,
+														demo,
+														&activity.name,
+													);
+												} else {
+													icons::inline(
+														ui,
+														activity_icon(&activity.name),
+														24.0,
+														colors.muted,
+													);
+												}
+												ui.with_layout(
+													egui::Layout::left_to_right(
+														egui::Align::Center,
+													),
+													|ui| {
+														ui.vertical(|ui| {
+															ui.spacing_mut().item_spacing.y = 0.0;
+															ui.add(
+																egui::Label::new(
+																	design::semibold(
+																		ui,
+																		state.user_display_name(
+																			user,
+																		),
+																		14.0,
+																	)
+																	.color(colors.text_strong),
+																)
+																.truncate()
+																.selectable(false),
+															);
+															ui.add(
+																egui::Label::new(
+																	RichText::new(activity_line(
+																		&activity.name,
+																		activity.started_at,
+																		now_ms,
+																	))
+																	.size(12.0)
+																	.color(colors.muted),
+																)
+																.truncate()
+																.selectable(false),
+															);
+															if let Some(details) = &activity.details
+															{
+																ui.add(
+																	egui::Label::new(
+																		RichText::new(details)
+																			.size(12.0)
+																			.color(colors.muted),
+																	)
+																	.truncate()
+																	.selectable(false),
+																);
+															}
+														});
+													},
 												);
 											},
 										);
@@ -1373,7 +1498,7 @@ const ACTIVE_WIDTH: f32 = 340.0;
 /// The column only appears when the list keeps a comfortable width beside it.
 const ACTIVE_MIN_WIDTH: f32 = 720.0;
 const ACTIVE_LIMIT: usize = 30;
-const ACTIVE_AVATARS: usize = 5;
+const ACTIVE_AVATARS: usize = 2;
 
 /// "5m", "3h", "2d": the largest whole unit, like Discord's Active Now.
 fn elapsed_label(elapsed_ms: u64) -> String {

@@ -112,6 +112,7 @@ members-heading = Membros
 no-conversation-selected = Nenhuma conversa selecionada
 select-conversation = Escolha um canal ou mensagem direta na lista.
 friends-active-now = Ativo agora
+friends-active-in-voice = Em um canal de voz
 friends-active-just-now = agora
 friends-active-two = { $a } e { $b }
 friends-active-many = { $a }, { $b } e { $n } outros

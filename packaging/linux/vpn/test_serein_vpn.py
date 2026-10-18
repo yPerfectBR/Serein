@@ -117,6 +117,7 @@ class Agent(unittest.TestCase):
         self.assertEqual(env["WAYLAND_DISPLAY"], "wayland-0")
         self.assertEqual(env["XDG_RUNTIME_DIR"], "/run/user/1")
         self.assertEqual(env["SEREIN_VPN_ACTIVE"], "1", "the tunnel markers come from the agent only")
+        self.assertEqual(env["SEREIN_VOICE_DIAGNOSTICS"], "1")
         for key in ("AWS_SECRET_ACCESS_KEY", "LD_PRELOAD", "GITHUB_TOKEN", "LANG"):
             self.assertNotIn(key, env)
 
