@@ -178,7 +178,7 @@ fn restart(ctx: &eframe::egui::Context, command: &[std::ffi::OsString]) {
 	let mut helper = std::process::Command::new("sh");
 	helper
 		.arg("-c")
-		.arg("pid=$1; shift; i=0; while kill -0 \"$pid\" 2>/dev/null && [ $i -lt 150 ]; do sleep 0.2; i=$((i+1)); done; d=\"${XDG_STATE_HOME:-$HOME/.local/state}/serein\"; mkdir -p \"$d\" 2>/dev/null; [ -w \"$d\" ] || exec \"$@\"; f=\"$d/serein.log\"; if [ -f \"$f\" ] && [ \"$(wc -c <\"$f\")\" -gt 5000000 ]; then : >\"$f\"; fi; exec \"$@\" >>\"$f\" 2>&1")
+		.arg("pid=$1; shift; i=0; while kill -0 \"$pid\" 2>/dev/null && [ $i -lt 150 ]; do sleep 0.2; i=$((i+1)); done; d=\"${XDG_STATE_HOME:-$HOME/.local/state}/serein\"; mkdir -p \"$d\" 2>/dev/null; [ -w \"$d\" ] || exec \"$@\"; f=\"$d/serein.log\"; if [ -f \"$f\" ] && [ \"$(wc -c <\"$f\")\" -gt 5000000 ]; then : >\"$f\"; fi; SEREIN_VOICE_DIAGNOSTICS=\"${SEREIN_VOICE_DIAGNOSTICS:-1}\"; export SEREIN_VOICE_DIAGNOSTICS; exec \"$@\" >>\"$f\" 2>&1")
 		.arg("serein-restart")
 		.arg(std::process::id().to_string())
 		.args(command)
