@@ -892,6 +892,10 @@ impl MessagingUi {
 		let person = |id: model::Id| -> Option<&model::User> {
 			state.friend(id).or_else(|| members.get(&id).copied())
 		};
+		// Friends first, so bots and people who are not friends come last in names and avatars.
+		for (_, _, users) in &mut calls {
+			users.sort_by_key(|id| state.friend(*id).is_none());
+		}
 		calls.truncate(ACTIVE_LIMIT);
 		let in_call: std::collections::HashSet<model::Id> = calls
 			.iter()
