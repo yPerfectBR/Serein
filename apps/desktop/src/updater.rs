@@ -441,6 +441,14 @@ impl Drop for Updater {
 	}
 }
 
+/// The release this build corresponds to. Source builds (distribution forks) can set
+/// `SEREIN_BUILD_VERSION` to the nightly their checkout contains; otherwise the workspace
+/// version is used, which is always older than any published release.
+const BUILD_VERSION: &str = match option_env!("SEREIN_BUILD_VERSION") {
+	Some(version) => version,
+	None => env!("CARGO_PKG_VERSION"),
+};
+
 fn client() -> Result<reqwest::Client, String> {
 	reqwest::Client::builder()
 		.https_only(true)
@@ -729,7 +737,7 @@ async fn check_release(
 		serde_json::from_slice::<Release>(&body).map(|r| vec![r])
 	}
 	.map_err(|_| "GitHub returned invalid release metadata.".to_owned())?;
-	let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+	let current = semver::Version::parse(BUILD_VERSION)
 		.map_err(|_| "This build has an invalid version.".to_owned())?;
 	let log = release_log(&releases, nightly, &current);
 	select_release(releases, nightly, &current).map(|package| (package, log))

@@ -57,6 +57,10 @@ pub(super) fn linux_package_manager_update_command() -> Option<&'static str> {
 	if !cfg!(target_os = "linux") || flatpak_session() || appimage_session() || nix_session() {
 		return None;
 	}
+	// A build from source is updated by rebuilding it, not by a distribution package.
+	if let Some(hint) = option_env!("SEREIN_UPDATE_HINT") {
+		return Some(hint);
+	}
 	if let Ok(content) = fs::read_to_string("/etc/os-release") {
 		let mut id = String::new();
 		let mut id_like = String::new();

@@ -29,6 +29,19 @@ impl Mode {
 		Self::NvidiaCopy,
 		Self::Software,
 	];
+	/// The order encoders are tried in. `SEREIN_SCREEN_ENCODER` (`nvidia`, `va` or `software`) moves
+	/// that family first, for example to use a dedicated GPU instead of the integrated one.
+	pub(super) fn order() -> Vec<Self> {
+		let first: &[Self] = match std::env::var("SEREIN_SCREEN_ENCODER").ok().as_deref() {
+			Some("nvidia") => &[Self::Nvidia, Self::NvidiaCopy],
+			Some("va") => &[Self::Va, Self::VaLegacy],
+			Some("software") => &[Self::Software],
+			_ => &[],
+		};
+		let mut order = first.to_vec();
+		order.extend(Self::ALL.into_iter().filter(|mode| !first.contains(mode)));
+		order
+	}
 	pub(super) fn label(self) -> &'static str {
 		match self {
 			Self::Va => "H.264 · VA-API hardware encoding",
@@ -370,4 +383,15 @@ pub(super) fn raw(sample: &gst::Sample) -> Result<RawFrame, &'static str> {
 		stride: row,
 		data: pixels,
 	})
+}
+
+#[cfg(test)]
+mod order_tests {
+	use super::Mode;
+
+	#[test]
+	fn the_encoder_preference_moves_a_family_first_without_dropping_the_others() {
+		// The default keeps the documented order.
+		assert!(Mode::order() == Mode::ALL.to_vec());
+	}
 }

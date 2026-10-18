@@ -122,7 +122,8 @@ pub(super) fn run(
 				})
 				.transpose()?;
 			let mut mode_index = 0;
-			while let Some(&mode) = Mode::ALL.get(mode_index) {
+			let modes = Mode::order();
+			while let Some(&mode) = modes.get(mode_index) {
 				mode_index += 1;
 				if stop.load(Ordering::Acquire) || send.is_closed() {
 					return Ok(());
