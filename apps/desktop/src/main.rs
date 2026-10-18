@@ -62,6 +62,7 @@ mod updater;
 mod uploads;
 mod video;
 mod voice;
+mod vpn;
 mod watch;
 use client_core::{
 	Command, Envelope, Event, State,

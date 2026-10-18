@@ -4,11 +4,24 @@ use std::sync::mpsc;
 use ui::network_route::{Candidate, Form, Login, Mode, Request, Status};
 
 enum Outcome {
-	Saved { has_login: bool },
+	Saved {
+		has_login: bool,
+	},
 	Removed,
 	Tested(Result<u128, String>),
 	CredentialStore,
 	SaveFailed,
+	Imported {
+		endpoint: String,
+		tools_missing: bool,
+	},
+	Cancelled,
+	InvalidConfig(String),
+	TunnelFailed(String),
+	Installed,
+	InstallFailed,
+	/// Permission is granted and the tunnel is ready: restart with this command.
+	Relaunch(Vec<std::ffi::OsString>),
 }
 
 #[derive(Default)]
@@ -54,6 +67,8 @@ pub fn apply_saved_login() {
 }
 
 fn save(candidate: &Candidate, had_login: bool) -> Outcome {
+	// A hand-typed proxy replaces an imported WireGuard configuration.
+	let _ = net_route::tunnel::remove_config();
 	let Some(proxy) = proxy_of(candidate) else {
 		return Outcome::SaveFailed;
 	};
@@ -86,10 +101,54 @@ fn save(candidate: &Candidate, had_login: bool) -> Outcome {
 fn remove() -> Outcome {
 	// A forgotten file must not leave a login behind for the next proxy.
 	let forgotten = platform::route_credentials::forget().is_ok();
+	let _ = net_route::tunnel::remove_config();
 	match net_route::write_config_file(None, false) {
 		Ok(()) if forgotten => Outcome::Removed,
 		Ok(()) => Outcome::CredentialStore,
 		Err(_) => Outcome::SaveFailed,
+	}
+}
+
+fn tools_missing() -> bool {
+	!crate::vpn::helper_present() || !crate::vpn::wireguard_tools_present()
+}
+
+/// Imports the chosen `.conf` and makes the next start run inside the tunnel. The proxy route is
+/// cleared: with the whole process in the tunnel there is nothing to proxy.
+fn import_config(source: &std::path::Path) -> Outcome {
+	let Some(destination) = net_route::tunnel::config_path() else {
+		return Outcome::SaveFailed;
+	};
+	let summary = match net_route::tunnel::import(source, &destination) {
+		Ok(summary) => summary,
+		Err(error) => return Outcome::InvalidConfig(error.to_string()),
+	};
+	// A login saved for an earlier proxy must not follow the tunnel.
+	if platform::route_credentials::forget().is_err() {
+		return Outcome::CredentialStore;
+	}
+	if net_route::write_config_file(None, false).is_err() {
+		return Outcome::SaveFailed;
+	}
+	Outcome::Imported {
+		endpoint: summary.endpoint,
+		tools_missing: tools_missing(),
+	}
+}
+
+/// Authorises (administrator prompt) and builds the tunnel, then names the command that restarts
+/// Serein in the right place. Nothing is closed if permission is refused.
+fn plan_restart() -> Outcome {
+	let Ok(exe) = std::env::current_exe() else {
+		return Outcome::SaveFailed;
+	};
+	let config = net_route::tunnel::config_path().filter(|path| path.is_file());
+	if config.is_none() && !crate::vpn::active() {
+		return Outcome::Relaunch(vec![exe.into_os_string()]);
+	}
+	match crate::vpn::authorize(config.as_deref()) {
+		Ok(()) => Outcome::Relaunch(crate::vpn::launch_args(config.as_deref(), &exe)),
+		Err(reason) => Outcome::TunnelFailed(reason),
 	}
 }
 
@@ -113,18 +172,16 @@ fn test_state(candidate: &Candidate, had_login: bool) -> Result<net_route::State
 }
 
 #[cfg(unix)]
-fn restart(ctx: &eframe::egui::Context) {
+fn restart(ctx: &eframe::egui::Context, command: &[std::ffi::OsString]) {
 	use std::os::unix::process::CommandExt;
-	let Ok(exe) = std::env::current_exe() else {
-		return;
-	};
 	// Wait for this process to exit (its single-instance lock), then start the new one.
 	let mut helper = std::process::Command::new("sh");
 	helper
 		.arg("-c")
-		.arg("i=0; while kill -0 \"$1\" 2>/dev/null && [ $i -lt 150 ]; do sleep 0.2; i=$((i+1)); done; exec \"$0\"")
-		.arg(&exe)
+		.arg("pid=$1; shift; i=0; while kill -0 \"$pid\" 2>/dev/null && [ $i -lt 150 ]; do sleep 0.2; i=$((i+1)); done; exec \"$@\"")
+		.arg("serein-restart")
 		.arg(std::process::id().to_string())
+		.args(command)
 		.stdin(std::process::Stdio::null())
 		.stdout(std::process::Stdio::null())
 		.stderr(std::process::Stdio::null())
@@ -139,7 +196,7 @@ fn restart(ctx: &eframe::egui::Context) {
 	}
 }
 #[cfg(not(unix))]
-fn restart(_: &eframe::egui::Context) {}
+fn restart(_: &eframe::egui::Context, _: &[std::ffi::OsString]) {}
 
 impl Handler {
 	pub fn tick(
@@ -157,7 +214,18 @@ impl Handler {
 			self.loaded = true;
 			form.env_locked = net_route::env_overrides();
 			form.restart_supported = cfg!(unix);
+			form.tool_missing = tools_missing();
+			form.vpn_active = crate::vpn::active();
+			form.tunnel = net_route::tunnel::config_path()
+				.and_then(|path| net_route::tunnel::summarize(&path))
+				.map(|summary| summary.endpoint);
+			if form.tunnel.is_some() {
+				form.load(Mode::Wireguard, "", 0, false);
+			}
+			// Running inside the tunnel without a configuration (or the reverse) needs a restart.
+			form.restart_needed = form.tunnel.is_some() != form.vpn_active;
 			match net_route::state() {
+				_ if form.tunnel.is_some() => {}
 				net_route::State::Proxy(proxy) => form.load(
 					mode_of(proxy.kind()),
 					proxy.host(),
@@ -189,6 +257,35 @@ impl Handler {
 						Outcome::Tested(Err(reason)) => form.status = Status::TestFailed(reason),
 						Outcome::CredentialStore => form.status = Status::CredentialStore,
 						Outcome::SaveFailed => form.status = Status::SaveFailed,
+						Outcome::Cancelled => form.status = Status::Idle,
+						Outcome::Imported {
+							endpoint,
+							tools_missing,
+						} => {
+							form.tunnel = Some(endpoint);
+							form.tool_missing = tools_missing;
+							form.clear_draft();
+							form.has_saved_login = false;
+							form.restart_needed = true;
+							form.status = if tools_missing {
+								Status::ToolMissing
+							} else {
+								Status::Imported
+							};
+						}
+						Outcome::InvalidConfig(reason) => {
+							form.status = Status::InvalidConfig(reason)
+						}
+						Outcome::TunnelFailed(reason) => form.status = Status::TunnelFailed(reason),
+						Outcome::Installed => {
+							form.tool_missing = tools_missing();
+							form.status = Status::Installed;
+						}
+						Outcome::Relaunch(command) => {
+							restart(ctx, &command);
+							form.status = Status::Restarting;
+						}
+						Outcome::InstallFailed => form.status = Status::InstallFailed,
 					}
 				}
 				Err(mpsc::TryRecvError::Empty) => {}
@@ -213,12 +310,59 @@ impl Handler {
 		let (send, receive) = mpsc::sync_channel(1);
 		let repaint = ctx.clone();
 		match request {
-			Request::Restart => restart(ctx),
+			Request::Restart => {
+				self.pending = Some(receive);
+				form.busy = true;
+				form.status = Status::Authorizing;
+				runtime.spawn_blocking(move || {
+					let _ = send.send(plan_restart());
+					repaint.request_repaint();
+				});
+			}
 			Request::Save(candidate) => {
 				self.pending = Some(receive);
 				form.busy = true;
 				runtime.spawn_blocking(move || {
 					let _ = send.send(save(&candidate, had_login));
+					repaint.request_repaint();
+				});
+			}
+			Request::ChooseConfig => {
+				self.pending = Some(receive);
+				form.busy = true;
+				runtime.spawn(async move {
+					let outcome = match platform::save::wireguard_source().await {
+						Some(path) => tokio::task::spawn_blocking(move || import_config(&path))
+							.await
+							.unwrap_or(Outcome::SaveFailed),
+						None => Outcome::Cancelled,
+					};
+					let _ = send.send(outcome);
+					repaint.request_repaint();
+				});
+			}
+			Request::InstallTool => {
+				self.pending = Some(receive);
+				form.busy = true;
+				runtime.spawn_blocking(move || {
+					let outcome = match crate::vpn::install_wireguard_tools() {
+						Ok(()) => Outcome::Installed,
+						Err(_) => Outcome::InstallFailed,
+					};
+					let _ = send.send(outcome);
+					repaint.request_repaint();
+				});
+			}
+			Request::TestTunnel => {
+				self.pending = Some(receive);
+				form.busy = true;
+				runtime.spawn(async move {
+					// This process is already inside the tunnel, so the direct route is the tunnel.
+					let outcome = match net_route::probe_gateway(&net_route::State::Direct).await {
+						Ok(elapsed) => Outcome::Tested(Ok(elapsed.as_millis())),
+						Err(reason) => Outcome::Tested(Err(reason)),
+					};
+					let _ = send.send(outcome);
 					repaint.request_repaint();
 				});
 			}

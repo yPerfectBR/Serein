@@ -285,6 +285,10 @@ impl State {
 	}
 }
 
+pub fn config_dir() -> Option<std::path::PathBuf> {
+	config_file().and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+}
+
 /// `$XDG_CONFIG_HOME/serein/proxy`, else `$HOME/.config/serein/proxy`.
 pub fn config_file() -> Option<std::path::PathBuf> {
 	let base = std::env::var_os("XDG_CONFIG_HOME")
@@ -350,7 +354,7 @@ pub fn env_overrides() -> bool {
 }
 
 /// Writes the proxy file (private directory and file, replaced atomically). The file never holds
-/// credentials: with `keyring` set it carries [`KEYRING_MARKER`] so the app loads them from the OS
+/// credentials: with `keyring` it carries [`KEYRING_MARKER`] so the app loads them from the OS
 /// credential store. `None` removes the file (direct connection).
 pub fn write_config_file(proxy: Option<&Proxy>, keyring: bool) -> IoResult<()> {
 	let path = config_file()
@@ -370,6 +374,19 @@ pub fn write_config_file_at(
 			_ => Ok(()),
 		};
 	};
+	let mut contents = String::from("# Serein network route (written by Settings > Network)\n");
+	contents.push_str(&proxy.endpoint());
+	contents.push('\n');
+	if keyring {
+		contents.push_str(KEYRING_MARKER);
+		contents.push('\n');
+	}
+	write_private_file(path, contents.as_bytes())
+}
+
+/// Replaces `path` atomically with `contents`, creating a private (0700) parent directory and a
+/// private (0600) file.
+pub fn write_private_file(path: &std::path::Path, contents: &[u8]) -> IoResult<()> {
 	let dir = path
 		.parent()
 		.ok_or_else(|| Error::new(ErrorKind::NotFound, "no configuration directory"))?;
@@ -379,14 +396,10 @@ pub fn write_config_file_at(
 		use std::os::unix::fs::PermissionsExt;
 		std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
 	}
-	let mut contents = String::from("# Serein network route (written by Settings > Network)\n");
-	contents.push_str(&proxy.endpoint());
-	contents.push('\n');
-	if keyring {
-		contents.push_str(KEYRING_MARKER);
-		contents.push('\n');
-	}
-	let temporary = dir.join(".proxy.tmp");
+	let temporary = dir.join(format!(
+		".{}.tmp",
+		path.file_name().and_then(|n| n.to_str()).unwrap_or("route")
+	));
 	{
 		use std::io::Write;
 		#[cfg(unix)]
@@ -401,7 +414,7 @@ pub fn write_config_file_at(
 		};
 		#[cfg(not(unix))]
 		let mut file = std::fs::File::create(&temporary)?;
-		file.write_all(contents.as_bytes())?;
+		file.write_all(contents)?;
 		file.sync_all()?;
 	}
 	std::fs::rename(&temporary, path)
@@ -704,6 +717,8 @@ async fn http_connect<S: AsyncRead + AsyncWrite + Unpin>(
 		)),
 	}
 }
+
+pub mod tunnel;
 
 #[cfg(test)]
 mod tests;

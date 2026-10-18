@@ -17,6 +17,15 @@ pub fn extension_source(
 	}
 }
 
+/// Explicit WireGuard configuration import; the host validates and copies the file.
+pub fn wireguard_source() -> impl std::future::Future<Output = Option<PathBuf>> + Send + 'static {
+	let dialog = rfd::AsyncFileDialog::new()
+		.set_title("Choose WireGuard configuration")
+		.add_filter("WireGuard configuration", &["conf"])
+		.pick_file();
+	async move { Some(dialog.await?.path().to_owned()) }
+}
+
 pub fn icon_source(
 	parent: Arc<winit::window::Window>,
 	title: &'static str,

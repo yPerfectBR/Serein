@@ -1,0 +1,326 @@
+#!/usr/bin/python3
+"""Runs commands inside a private network namespace whose only route is a WireGuard tunnel.
+
+Used by Serein (Settings > Network > WireGuard) and usable from a terminal or scripts:
+
+  serein-vpn up <wg.conf>                     create or refresh the namespace and tunnel
+  serein-vpn run <wg.conf> [--env K=V]... -- <command...>
+                                              up, then run <command> inside it as the calling user
+  serein-vpn host [--env K=V]... -- <command...>
+                                              run <command> outside the namespace as the calling user
+  serein-vpn status                           show the tunnel and its latest handshake
+  serein-vpn down                             remove the namespace and tunnel
+  serein-vpn ping                             succeed once the caller is authorised (for pkexec)
+  serein-vpn check <wg.conf>                  validate a configuration without touching the system
+
+It needs root (use `sudo` or `pkexec`). Everything the command does, including voice and video
+UDP, leaves through the tunnel; the rest of the computer keeps its normal connection. The command
+itself never runs as root: it is started as the user who invoked sudo or pkexec.
+"""
+import base64
+import hashlib
+import ipaddress
+import os
+import pwd
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+
+NS = "serein-vpn"
+IFACE = "wg-serein"
+STATE_DIR = "/run/serein-vpn"
+NETNS_ETC = f"/etc/netns/{NS}"
+MAX_CONFIG = 16 * 1024
+ENV_ALLOWED = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+ENV_DENIED = ("LD_", "SEREIN_VPN_")
+
+INTERFACE_KEYS = {"privatekey", "address", "dns", "mtu", "listenport"}
+PEER_KEYS = {"publickey", "presharedkey", "endpoint", "allowedips", "persistentkeepalive"}
+
+
+class Fail(Exception):
+    pass
+
+
+def key_ok(value):
+    try:
+        return len(value) == 44 and len(base64.b64decode(value, validate=True)) == 32
+    except Exception:
+        return False
+
+
+def read_config(path, uid):
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        fd = os.open(path, flags)
+    except OSError as error:
+        raise Fail(f"cannot open {path}: {error.strerror}")
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise Fail("the configuration is not a regular file")
+        if uid is not None and info.st_uid not in (uid, 0):
+            raise Fail("the configuration is not owned by you")
+        if info.st_size > MAX_CONFIG:
+            raise Fail("the configuration is larger than 16 KiB")
+        data = handle.read(MAX_CONFIG + 1)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Fail("the configuration is not text")
+
+
+def parse(text):
+    """Allow-list parser: one [Interface], one [Peer], no hooks, no other sections."""
+    interface, peer, section = {}, {}, None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("["):
+            name = line.strip("[] ").lower()
+            if name not in ("interface", "peer") or (name == "interface" and interface) or (name == "peer" and peer):
+                raise Fail(f"unsupported or repeated section {line}")
+            section = name
+            continue
+        if "=" not in line or section is None:
+            raise Fail("malformed line")
+        key, value = (part.strip() for part in line.split("=", 1))
+        key = key.lower()
+        allowed = INTERFACE_KEYS if section == "interface" else PEER_KEYS
+        if key not in allowed:
+            raise Fail(f"unsupported setting {key}")
+        if any(ord(c) < 32 or ord(c) == 127 for c in value) or key in (interface if section == "interface" else peer):
+            raise Fail(f"invalid {key}")
+        (interface if section == "interface" else peer)[key] = value
+    for table, keys in ((interface, ("privatekey", "address")), (peer, ("publickey", "allowedips", "endpoint"))):
+        for key in keys:
+            if key not in table:
+                raise Fail(f"missing {key}")
+    if not key_ok(interface["privatekey"]) or not key_ok(peer["publickey"]):
+        raise Fail("invalid key")
+    if "presharedkey" in peer and not key_ok(peer["presharedkey"]):
+        raise Fail("invalid presharedkey")
+    try:
+        addresses = [ipaddress.ip_interface(item.strip()) for item in interface["address"].split(",") if item.strip()]
+        allowed = [ipaddress.ip_network(item.strip(), strict=False) for item in peer["allowedips"].split(",") if item.strip()]
+        dns = [ipaddress.ip_address(item.strip()) for item in interface.get("dns", "").split(",") if item.strip()]
+        mtu = int(interface["mtu"]) if "mtu" in interface else None
+        keepalive = int(peer["persistentkeepalive"]) if "persistentkeepalive" in peer else None
+    except ValueError as error:
+        raise Fail(f"invalid value ({error})")
+    if not addresses or not allowed:
+        raise Fail("missing address or allowedips")
+    if mtu is not None and not 576 <= mtu <= 9000:
+        raise Fail("invalid mtu")
+    if keepalive is not None and not 0 <= keepalive <= 65535:
+        raise Fail("invalid persistentkeepalive")
+    host, _, port = peer["endpoint"].rpartition(":")
+    if not host or not port.isdigit() or not 0 < int(port) < 65536:
+        raise Fail("invalid endpoint")
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", host):
+            raise Fail("invalid endpoint")
+    return {
+        "interface": interface, "peer": peer, "addresses": addresses,
+        "allowed": allowed, "dns": dns, "mtu": mtu,
+    }
+
+
+def sh(*argv, check=True, capture=False):
+    result = subprocess.run(argv, stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True)
+    if check and result.returncode != 0:
+        raise Fail(f"{' '.join(argv[:3])}: {result.stderr.strip() or 'failed'}")
+    return result
+
+
+def namespace_exists():
+    return NS in sh("ip", "netns", "list", capture=True, check=False).stdout.split()
+
+
+def caller():
+    uid = os.environ.get("PKEXEC_UID") or os.environ.get("SUDO_UID")
+    if uid is None or not uid.isdigit() or int(uid) == 0:
+        raise Fail("run this through sudo or pkexec as a normal user")
+    try:
+        entry = pwd.getpwuid(int(uid))
+    except KeyError:
+        raise Fail("unknown calling user")
+    return entry
+
+
+def leave_user_namespace_state():
+    """pkexec starts us in the caller's network namespace; configuration needs the host one."""
+    try:
+        mine = os.readlink("/proc/self/ns/net")
+        host = os.readlink("/proc/1/ns/net")
+    except OSError:
+        return
+    if mine != host and not os.environ.get("SEREIN_VPN_REEXEC"):
+        env = dict(os.environ, SEREIN_VPN_REEXEC="1")
+        os.execvpe("nsenter", ["nsenter", "-t", "1", "-n", "--", sys.executable] + sys.argv, env)
+
+
+def teardown():
+    sh("ip", "netns", "del", NS, check=False)
+    sh("ip", "link", "del", "dev", IFACE, check=False)
+    shutil.rmtree(NETNS_ETC, ignore_errors=True)
+    shutil.rmtree(STATE_DIR, ignore_errors=True)
+
+
+def digest(parsed, text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def up(path, entry):
+    text = read_config(path, entry.pw_uid)
+    parsed = parse(text)
+    fingerprint = digest(parsed, text)
+    marker = os.path.join(STATE_DIR, "fingerprint")
+    if namespace_exists() and os.path.exists(marker) and open(marker).read().strip() == fingerprint:
+        live = sh("ip", "netns", "exec", NS, "ip", "link", "show", IFACE, check=False)
+        if live.returncode == 0:
+            return parsed
+    teardown()
+    interface, peer = parsed["interface"], parsed["peer"]
+    with tempfile.NamedTemporaryFile("w", prefix="wg-", dir="/run", delete=False) as handle:
+        os.chmod(handle.name, 0o600)
+        handle.write(f"[Interface]\nPrivateKey = {interface['privatekey']}\n")
+        if "listenport" in interface and interface["listenport"].isdigit():
+            handle.write(f"ListenPort = {interface['listenport']}\n")
+        handle.write(f"\n[Peer]\nPublicKey = {peer['publickey']}\nAllowedIPs = {peer['allowedips']}\nEndpoint = {peer['endpoint']}\n")
+        if "presharedkey" in peer:
+            handle.write(f"PresharedKey = {peer['presharedkey']}\n")
+        if "persistentkeepalive" in peer:
+            handle.write(f"PersistentKeepalive = {peer['persistentkeepalive']}\n")
+        wg_file = handle.name
+    try:
+        sh("ip", "netns", "add", NS)
+        sh("ip", "link", "add", "dev", IFACE, "type", "wireguard")
+        sh("wg", "setconf", IFACE, wg_file)
+        sh("ip", "link", "set", IFACE, "netns", NS)
+    except Fail:
+        teardown()
+        raise
+    finally:
+        os.unlink(wg_file)
+    try:
+        for address in parsed["addresses"]:
+            sh("ip", "-n", NS, "addr", "add", str(address), "dev", IFACE)
+        if parsed["mtu"]:
+            sh("ip", "-n", NS, "link", "set", IFACE, "mtu", str(parsed["mtu"]))
+        sh("ip", "-n", NS, "link", "set", IFACE, "up")
+        sh("ip", "-n", NS, "link", "set", "lo", "up")
+        for network in parsed["allowed"]:
+            family = ["-6"] if network.version == 6 else []
+            target = "default" if network.prefixlen == 0 else str(network)
+            sh("ip", "-n", NS, *family, "route", "add", target, "dev", IFACE)
+        os.makedirs(NETNS_ETC, exist_ok=True)
+        servers = [str(item) for item in parsed["dns"]] or ["1.1.1.1"]
+        with open(os.path.join(NETNS_ETC, "resolv.conf"), "w") as handle:
+            handle.write("".join(f"nameserver {server}\n" for server in servers + ["1.1.1.1"]))
+        os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
+        with open(marker, "w") as handle:
+            handle.write(fingerprint + "\n")
+        with open(os.path.join(STATE_DIR, "endpoint"), "w") as handle:
+            handle.write(peer["endpoint"] + "\n")
+    except Fail:
+        teardown()
+        raise
+    return parsed
+
+
+def split_command(args):
+    environment, index = {}, 0
+    while index < len(args) and args[index] == "--env":
+        pair = args[index + 1] if index + 1 < len(args) else ""
+        key, _, value = pair.partition("=")
+        if not ENV_ALLOWED.match(key) or key.startswith(ENV_DENIED) or "\n" in value or "\0" in value:
+            raise Fail(f"refusing environment entry {key!r}")
+        environment[key] = value
+        index += 2
+    if index >= len(args) or args[index] != "--" or index + 1 >= len(args):
+        raise Fail("expected: [--env K=V]... -- <command...>")
+    return environment, args[index + 1:]
+
+
+def exec_as_user(entry, prefix, environment, command, extra):
+    base = {
+        "HOME": entry.pw_dir, "USER": entry.pw_name, "LOGNAME": entry.pw_name,
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+    }
+    base.update(environment)
+    base.update(extra)
+    argv = list(prefix) + [
+        "setpriv", f"--reuid={entry.pw_uid}", f"--regid={entry.pw_gid}", "--init-groups",
+        "--inh-caps=-all", "--no-new-privs", "--", "env", "-i",
+    ] + [f"{key}={value}" for key, value in base.items()] + command
+    os.execvp(argv[0], argv)
+
+
+def status():
+    if not namespace_exists():
+        print("serein-vpn: down")
+        return 1
+    shown = sh("ip", "netns", "exec", NS, "wg", "show", IFACE, "latest-handshakes", capture=True, check=False)
+    peers = shown.stdout.split()
+    stamp = int(peers[1]) if len(peers) > 1 and peers[1].isdigit() else 0
+    endpoint = ""
+    try:
+        endpoint = open(os.path.join(STATE_DIR, "endpoint")).read().strip()
+    except OSError:
+        pass
+    print(f"serein-vpn: up\nendpoint: {endpoint}\nhandshake: {'never' if not stamp else stamp}")
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    command = argv[0]
+    if command == "check":
+        if len(argv) != 2:
+            raise Fail("usage: serein-vpn check <wg.conf>")
+        parsed = parse(read_config(argv[1], None))
+        print(f"ok: {parsed['peer']['endpoint']}")
+        return 0
+    if os.geteuid() != 0:
+        raise Fail("must run as root (use sudo or pkexec)")
+    leave_user_namespace_state()
+    entry = caller()
+    if command == "ping":
+        return 0
+    if command == "status":
+        return status()
+    if command == "down":
+        teardown()
+        print("serein-vpn: removed")
+        return 0
+    if command == "up" and len(argv) == 2:
+        parsed = up(argv[1], entry)
+        print(f"serein-vpn: up ({parsed['peer']['endpoint']})")
+        return 0
+    if command == "run" and len(argv) >= 2:
+        parsed = up(argv[1], entry)
+        environment, run = split_command(argv[2:])
+        exec_as_user(entry, ["ip", "netns", "exec", NS], environment, run,
+                     {"SEREIN_VPN_ACTIVE": "1", "SEREIN_VPN_ENDPOINT": parsed["peer"]["endpoint"]})
+    if command == "host":
+        environment, run = split_command(argv[1:])
+        exec_as_user(entry, [], environment, run, {})
+    raise Fail("usage: serein-vpn up|run|host|status|down|ping|check (see --help)")
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Fail as error:
+        print(f"serein-vpn: {error}", file=sys.stderr)
+        sys.exit(2)

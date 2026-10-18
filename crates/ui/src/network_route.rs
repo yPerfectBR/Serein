@@ -10,19 +10,22 @@ pub enum Mode {
 	Direct,
 	Socks5,
 	Http,
+	/// A WireGuard `.conf` run by the app as a local SOCKS5 tunnel.
+	Wireguard,
 }
 impl Mode {
-	const ALL: [Self; 3] = [Self::Direct, Self::Socks5, Self::Http];
+	const ALL: [Self; 4] = [Self::Direct, Self::Socks5, Self::Http, Self::Wireguard];
 	fn label_key(self) -> &'static str {
 		match self {
 			Self::Direct => "network-mode-direct",
 			Self::Socks5 => "network-mode-socks5",
 			Self::Http => "network-mode-http",
+			Self::Wireguard => "network-mode-wireguard",
 		}
 	}
 	pub fn kind(self) -> Option<net_route::Kind> {
 		match self {
-			Self::Direct => None,
+			Self::Direct | Self::Wireguard => None,
 			Self::Socks5 => Some(net_route::Kind::Socks5),
 			Self::Http => Some(net_route::Kind::HttpConnect),
 		}
@@ -49,6 +52,11 @@ pub enum Request {
 	Test(Candidate),
 	Remove,
 	Restart,
+	/// Pick a WireGuard `.conf`, import it and start the tunnel.
+	ChooseConfig,
+	TestTunnel,
+	/// Install the `wireproxy` tool (asks the system for permission).
+	InstallTool,
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
@@ -66,6 +74,15 @@ pub enum Status {
 	CredentialStore,
 	SaveFailed,
 	Demo,
+	Imported,
+	InvalidConfig(String),
+	ToolMissing,
+	Installing,
+	Installed,
+	InstallFailed,
+	TunnelFailed(String),
+	Authorizing,
+	Restarting,
 }
 impl Status {
 	fn key(&self) -> Option<&'static str> {
@@ -80,7 +97,17 @@ impl Status {
 			Self::CredentialStore => "network-status-credential-store",
 			Self::SaveFailed => "network-status-save-failed",
 			Self::Demo => "network-status-demo",
-			Self::TestOk(_) | Self::TestFailed(_) => return None,
+			Self::Imported => "network-status-imported",
+			Self::ToolMissing => "network-status-tool-missing",
+			Self::Installing => "network-status-installing",
+			Self::Installed => "network-status-installed",
+			Self::InstallFailed => "network-status-install-failed",
+			Self::Authorizing => "network-status-authorizing",
+			Self::Restarting => "network-status-restarting",
+			Self::TestOk(_)
+			| Self::TestFailed(_)
+			| Self::InvalidConfig(_)
+			| Self::TunnelFailed(_) => return None,
 		})
 	}
 }
@@ -99,6 +126,12 @@ pub struct Form {
 	/// A change was saved; the route is read when Serein starts.
 	pub restart_needed: bool,
 	pub restart_supported: bool,
+	/// Host-owned state: endpoint of the imported WireGuard configuration (never its keys).
+	pub tunnel: Option<String>,
+	/// Host-owned state: `wireguard-tools` or the `serein-vpn` helper is not installed.
+	pub tool_missing: bool,
+	/// Host-owned state: this process already runs inside the WireGuard tunnel.
+	pub vpn_active: bool,
 	pub request: Option<Request>,
 	pub status: Status,
 	/// Host is working (saving or testing); inputs are disabled.
@@ -122,7 +155,12 @@ impl Form {
 	pub fn preview(&mut self, mode: Mode, status: Status, saved_login: bool) {
 		self.load(mode, "127.0.0.1", 1080, saved_login);
 		self.restart_supported = true;
-		self.restart_needed = matches!(status, Status::Saved);
+		self.restart_needed = matches!(status, Status::Saved | Status::Imported);
+		if mode == Mode::Wireguard {
+			self.tunnel = Some("185.107.56.22:51820".into());
+			self.vpn_active = matches!(status, Status::TestOk(_));
+			self.restart_needed = !self.vpn_active;
+		}
 		self.status = status;
 	}
 
@@ -134,6 +172,10 @@ impl Form {
 
 	/// Validates the inputs with the same rules the transport uses.
 	pub fn candidate(&self) -> Result<Candidate, Status> {
+		if self.mode == Mode::Wireguard {
+			// The tunnel owns its own address; there is nothing typed to validate.
+			return Err(Status::InvalidAddress);
+		}
 		let Some(kind) = self.mode.kind() else {
 			return Ok(Candidate {
 				mode: Mode::Direct,
@@ -172,6 +214,13 @@ impl Form {
 	}
 
 	fn queue(&mut self, test: bool) {
+		if self.mode == Mode::Wireguard {
+			if test && self.vpn_active {
+				self.status = Status::Testing;
+				self.request = Some(Request::TestTunnel);
+			}
+			return;
+		}
 		match self.candidate() {
 			Err(status) => self.status = status,
 			Ok(candidate) if candidate.mode == Mode::Direct && test => {
@@ -206,7 +255,25 @@ impl Form {
 						self.status = Status::Idle;
 					}
 				});
-				if self.mode != Mode::Direct {
+				if self.mode == Mode::Wireguard {
+					design::card_divider(ui);
+					design::hint(ui, &crate::i18n::translate("network-wg-detail"));
+					if let Some(endpoint) = &self.tunnel {
+						design::hint(
+							ui,
+							&crate::i18n::translate_args(
+								"network-wg-loaded",
+								&[("endpoint", endpoint)],
+							),
+						);
+					}
+					if self.vpn_active {
+						design::hint(ui, &crate::i18n::translate("network-wg-active"));
+					}
+					if self.tool_missing {
+						design::hint(ui, &crate::i18n::translate("network-wg-tool-missing"));
+					}
+				} else if self.mode != Mode::Direct {
 					design::card_divider(ui);
 					labelled(ui, "network-host", Some("network-host-detail"), |ui| {
 						design::input(
@@ -245,10 +312,32 @@ impl Form {
 			ui.add_space(8.0);
 			ui.horizontal(|ui| {
 				ui.add_enabled_ui(editable, |ui| {
-					if design::button(ui, "network-save", design::ButtonKind::Primary).clicked() {
+					if self.mode == Mode::Wireguard {
+						if design::button(ui, "network-wg-choose", design::ButtonKind::Primary)
+							.clicked()
+						{
+							self.status = Status::Idle;
+							self.request = Some(Request::ChooseConfig);
+						}
+						if self.tool_missing
+							&& design::button(ui, "network-wg-install", design::ButtonKind::Neutral)
+								.clicked()
+						{
+							self.status = Status::Installing;
+							self.request = Some(Request::InstallTool);
+						}
+						if self.vpn_active
+							&& design::button(ui, "network-test", design::ButtonKind::Outline)
+								.clicked()
+						{
+							self.queue(true);
+						}
+					} else if design::button(ui, "network-save", design::ButtonKind::Primary)
+						.clicked()
+					{
 						self.queue(false);
 					}
-					if self.mode != Mode::Direct {
+					if self.mode != Mode::Direct && self.mode != Mode::Wireguard {
 						if design::button(ui, "network-test", design::ButtonKind::Outline).clicked()
 						{
 							self.queue(true);
@@ -306,6 +395,24 @@ impl Form {
 					ui,
 					&crate::i18n::translate_args(
 						"network-status-test-failed",
+						&[("reason", reason)],
+					),
+				);
+			}
+			Status::InvalidConfig(reason) => {
+				design::hint(
+					ui,
+					&crate::i18n::translate_args(
+						"network-status-invalid-config",
+						&[("reason", reason)],
+					),
+				);
+			}
+			Status::TunnelFailed(reason) => {
+				design::hint(
+					ui,
+					&crate::i18n::translate_args(
+						"network-status-tunnel-failed",
 						&[("reason", reason)],
 					),
 				);
@@ -451,6 +558,21 @@ mod tests {
 	}
 
 	#[test]
+	fn wireguard_mode_never_saves_typed_fields_and_tests_only_inside_the_tunnel() {
+		let mut f = form(Mode::Wireguard, "", "");
+		f.queue(false);
+		assert!(f.request.is_none());
+		f.queue(true);
+		assert!(f.request.is_none(), "not running inside the tunnel yet");
+		assert!(f.candidate().is_err());
+		f.tunnel = Some("203.0.113.10:51820".into());
+		f.vpn_active = true;
+		f.queue(true);
+		assert!(matches!(f.request.take(), Some(Request::TestTunnel)));
+		assert_eq!(f.status, Status::Testing);
+	}
+
+	#[test]
 	fn forgetting_the_login_queues_a_save_that_forgets_it() {
 		let mut f = form(Mode::Socks5, "127.0.0.1", "1080");
 		f.has_saved_login = true;
@@ -474,12 +596,16 @@ mod tests {
 			(Mode::Socks5, false, false),
 			(Mode::Http, true, false),
 			(Mode::Socks5, false, true),
+			(Mode::Wireguard, false, false),
 		] {
 			let mut f = form(mode, "127.0.0.1", "1080");
 			f.env_locked = env_locked;
 			f.restart_needed = true;
 			f.restart_supported = true;
 			f.has_saved_login = true;
+			f.tunnel = Some("203.0.113.10:51820".into());
+			f.tool_missing = mode == Mode::Wireguard;
+			f.vpn_active = mode == Mode::Wireguard;
 			f.status = Status::TestOk(120);
 			let mut output = ctx.run_ui(egui::RawInput::default(), |ui| f.show(ui, demo));
 			output.textures_delta.clear();

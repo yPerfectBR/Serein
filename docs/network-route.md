@@ -1,4 +1,36 @@
-# Network route (proxy)
+# Network route (proxy and WireGuard)
+
+## WireGuard for the whole app (recommended for Go Live in a restricted region)
+
+Discord decides some features from the address of the gateway connection *and* the voice/video
+media. A proxy only carries TCP, so voice and screen-share UDP would leave from your own address
+while the session sits behind the proxy; that mismatch can make streams fail to load for viewers.
+The WireGuard mode avoids it: Serein restarts inside a private network namespace whose only route
+is your tunnel, so every connection (gateway, REST, voice, video) shares one address. The rest of the
+computer keeps its normal connection.
+
+In **Settings → Network → WireGuard**, choose the `.conf` from your VPN provider (Serein validates it
+against an allow-list and keeps a private copy in `~/.config/serein/wireguard.conf`), then press
+**Restart Serein**. The system asks for the administrator password (polkit) to create the namespace;
+Serein itself never runs as root. Choose Direct (or another route) and restart to leave the tunnel.
+
+It needs `wireguard-tools`, `iproute2`, `polkit` and the `serein-vpn` helper
+(`packaging/linux/vpn`, installed to `/usr/local/libexec/serein-vpn`). The page offers to install
+`wireguard-tools`. The namespace is `serein-vpn`; the interface is `wg-serein`.
+
+Terminal and scripts (everything the page does is available here too):
+
+```sh
+serein-route vpn import wg.conf   # validate and keep the configuration (no root)
+serein-route vpn start            # start Serein inside the tunnel (sudo, or SEREIN_VPN_PRIV=pkexec)
+serein-route vpn host             # start Serein outside the tunnel
+serein-route vpn status | stop    # tunnel state / remove the namespace
+sudo /usr/local/libexec/serein-vpn run wg.conf -- curl -s https://ifconfig.me   # any command, as you
+```
+
+The proxy sections below still work for people without a WireGuard tunnel they can use this way.
+
+## Proxy
 
 **Settings → Network** configures this from the app: choose Direct, SOCKS5 or HTTP, enter the
 address and port, optionally a login, then **Save** (and **Test connection**, which opens the Discord

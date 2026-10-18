@@ -317,6 +317,8 @@ impl MessagingUi {
 					true,
 				),
 				"saved" => (Mode::Socks5, Status::Saved, false),
+				"wireguard" => (Mode::Wireguard, Status::Imported, false),
+				"wireguard-missing" => (Mode::Wireguard, Status::ToolMissing, false),
 				_ => (Mode::Socks5, Status::TestOk(184), false),
 			};
 			self.settings.network.preview(mode, status, login);
