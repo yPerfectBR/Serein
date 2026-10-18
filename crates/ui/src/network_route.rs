@@ -373,9 +373,13 @@ impl Form {
 			}
 		});
 		design::group(ui, "network-scope-title", |ui| {
-			design::hint(ui, &crate::i18n::translate("network-scope-routed"));
-			design::card_divider(ui);
-			design::hint(ui, &crate::i18n::translate("network-scope-direct"));
+			if self.mode == Mode::Wireguard {
+				design::hint(ui, &crate::i18n::translate("network-scope-wireguard"));
+			} else {
+				design::hint(ui, &crate::i18n::translate("network-scope-routed"));
+				design::card_divider(ui);
+				design::hint(ui, &crate::i18n::translate("network-scope-direct"));
+			}
 			design::card_divider(ui);
 			design::hint(ui, &crate::i18n::translate("network-terms"));
 		});

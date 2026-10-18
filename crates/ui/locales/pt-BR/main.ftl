@@ -4882,4 +4882,5 @@ network-status-demo = O modo demonstração não altera a rota de rede.
 network-scope-title = O que isso muda
 network-scope-routed = Pelo proxy: o gateway (a sua sessão), a sinalização de voz e de compartilhamento de tela, a API REST e o download de avatares e imagens.
 network-scope-direct = Fora do proxy: a mídia de voz e de transmissão (UDP), a janela de login e o download externo de vídeo ou extensões.
+network-scope-wireguard = Pelo túnel: tudo o que o Serein faz, incluindo gateway, mídia de voz e vídeo, compartilhamento de tela, API REST e imagens. Os outros aplicativos não são afetados.
 network-terms = Usar proxy ou VPN para contornar uma restrição pode violar os Termos de Serviço do Discord, e um login de um lugar inesperado pode exigir verificação extra.
