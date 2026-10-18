@@ -1026,26 +1026,6 @@ impl MessagingUi {
 											tile.shrink(9.0),
 											colors.positive,
 										);
-										ui.vertical(|ui| {
-											ui.spacing_mut().item_spacing.y = 0.0;
-											ui.add(
-												egui::Label::new(
-													design::semibold(ui, guild_name, 14.0)
-														.color(colors.text_strong),
-												)
-												.truncate()
-												.selectable(false),
-											);
-											ui.add(
-												egui::Label::new(
-													RichText::new(channel_name)
-														.size(12.0)
-														.color(colors.muted),
-												)
-												.truncate()
-												.selectable(false),
-											);
-										});
 										ui.with_layout(
 											egui::Layout::right_to_left(egui::Align::Center),
 											|ui| {
@@ -1066,6 +1046,37 @@ impl MessagingUi {
 															.show_plain(ui, user, 24.0, state.demo);
 													}
 												}
+												// What is left of the row, after the avatars, holds the names.
+												ui.with_layout(
+													egui::Layout::left_to_right(
+														egui::Align::Center,
+													),
+													|ui| {
+														ui.spacing_mut().item_spacing.x = 8.0;
+														ui.vertical(|ui| {
+															ui.spacing_mut().item_spacing.y = 0.0;
+															ui.add(
+																egui::Label::new(
+																	design::semibold(
+																		ui, guild_name, 14.0,
+																	)
+																	.color(colors.text_strong),
+																)
+																.truncate()
+																.selectable(false),
+															);
+															ui.add(
+																egui::Label::new(
+																	RichText::new(channel_name)
+																		.size(12.0)
+																		.color(colors.muted),
+																)
+																.truncate()
+																.selectable(false),
+															);
+														});
+													},
+												);
 											},
 										);
 									});
@@ -1167,6 +1178,17 @@ impl MessagingUi {
 												.truncate()
 												.selectable(false),
 											);
+											if let Some(details) = &activity.details {
+												ui.add(
+													egui::Label::new(
+														RichText::new(details)
+															.size(12.0)
+															.color(colors.muted),
+													)
+													.truncate()
+													.selectable(false),
+												);
+											}
 										});
 										ui.with_layout(
 											egui::Layout::right_to_left(egui::Align::Center),
@@ -1183,9 +1205,6 @@ impl MessagingUi {
 								});
 								if row.clicked() {
 									action = Some(ActiveAction::Message(user.id));
-								}
-								if let Some(details) = &activity.details {
-									ui.label(RichText::new(details).size(12.0).color(colors.muted));
 								}
 							});
 						}
