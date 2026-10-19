@@ -862,6 +862,16 @@ impl Calls {
 		if !allowed && !own {
 			return Ok(());
 		}
+		// A move keeps this device's voice session. An update for another channel that carries the
+		// session already seen for the active call is therefore the server moving us (for example a
+		// bot taking us out of a "create a channel" room right after the join), not a stale frame
+		// from a previous channel.
+		let same_session = own
+			&& session.as_ref().is_some_and(|session| {
+				self.active_session
+					.as_ref()
+					.is_some_and(|previous| previous.expose() == session.as_str())
+			});
 		let matches_active = allowed
 			&& self
 				.active
@@ -873,6 +883,7 @@ impl Calls {
 			&& self.active.is_some()
 			&& !matches_active
 			&& !self.session_confirmed
+			&& !same_session
 		{
 			// A previous-channel update cannot invalidate a newly submitted, unconfirmed Join.
 			return Ok(());
@@ -882,7 +893,9 @@ impl Calls {
 		} else {
 			None
 		};
-		let moved = self.session_confirmed && state.channel_id.is_some() && !matches_active;
+		let moved = (self.session_confirmed || same_session)
+			&& state.channel_id.is_some()
+			&& !matches_active;
 		let changed_session = self.session_confirmed
 			&& matches_active
 			&& secret.as_ref().is_some_and(|session| {
@@ -2160,6 +2173,72 @@ mod tests {
 			);
 			assert_eq!(calls.active, Some((Id(21), 6)));
 		}
+	}
+
+	#[test]
+	fn a_server_move_right_after_the_join_is_not_mistaken_for_a_stale_frame() {
+		// A "create a channel" room moves the member before the join is confirmed.
+		let mut calls = Calls::default();
+		calls.allowed.insert(Id(20), Some(Id(10)));
+		calls.allowed.insert(Id(21), Some(Id(10)));
+		let events = Mutex::new(Vec::new());
+		let emit = |event| {
+			events.lock().unwrap().push(event);
+			Ok(())
+		};
+		let update = |channel, session| {
+			serde_json::to_vec(
+				&json!({"guild_id":Id(10),"channel_id":channel,"user_id":Id(1),"session_id":session}),
+			)
+			.unwrap()
+		};
+		calls
+			.packet(Command::Join {
+				channel: Id(20),
+				request: 5,
+				ring: false,
+				mute: false,
+				deaf: false,
+			})
+			.unwrap();
+		calls
+			.dispatch(
+				"VOICE_STATE_UPDATE",
+				&update(Id(20), "ours"),
+				Some(Id(1)),
+				&emit,
+			)
+			.unwrap();
+		assert!(!calls.session_confirmed);
+		// A frame for another channel with a different session is still a stale one: ignored.
+		events.lock().unwrap().clear();
+		calls
+			.dispatch(
+				"VOICE_STATE_UPDATE",
+				&update(Id(21), "previous"),
+				Some(Id(1)),
+				&emit,
+			)
+			.unwrap();
+		assert_eq!(calls.active, Some((Id(20), 5)));
+		assert!(events.lock().unwrap().is_empty());
+		// The same session now in another channel is the server moving us.
+		calls
+			.dispatch(
+				"VOICE_STATE_UPDATE",
+				&update(Id(21), "ours"),
+				Some(Id(1)),
+				&emit,
+			)
+			.unwrap();
+		assert!(!calls.has_call());
+		assert!(matches!(
+			events.lock().unwrap()[0],
+			Event::Voice(voice::Event::TakenOver {
+				channel: Id(20),
+				request: 5
+			})
+		));
 	}
 
 	#[test]
