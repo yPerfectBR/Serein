@@ -151,10 +151,23 @@ impl Capture {
 		};
 		// Raw queues discard stale pictures. The encoded sink blocks upstream instead of
 		// discarding reference pictures; pressure then reaches the raw queue.
+		// Portals deliver a picture only when the screen changes (the cursor does not count), so an
+		// idle desktop would stop the stream. Repeating the latest picture at the stream's frame rate
+		// keeps it alive and lets a new viewer's keyframe request reach the encoder, like WebRTC's
+		// screen-share repeat does. SEREIN_SCREEN_IDLE_REPEAT=0 turns it off.
+		let idle =
+			if std::env::var_os("SEREIN_SCREEN_IDLE_REPEAT").is_some_and(|value| value == "0") {
+				String::new()
+			} else {
+				format!(
+					"imagefreeze allow-replace=true is-live=true ! video/x-raw(ANY),framerate={}/1 ! ",
+					settings.fps
+				)
+			};
 		let description = format!(
 			"capsfilter caps=\"video/x-raw(ANY),width=[1,7680],height=[1,4320]\" ! \
 			queue max-size-buffers=1 max-size-bytes={MAX_SOURCE_BYTES} max-size-time=0 leaky=downstream ! \
-			videorate drop-only=true ! video/x-raw(ANY),framerate={}/1 ! {scale} ! tee name=split \
+			videorate drop-only=true ! video/x-raw(ANY),framerate={}/1 ! {scale} ! {idle}tee name=split \
 			split. ! queue max-size-buffers=1 max-size-bytes={MAX_RAW_BYTES} max-size-time=0 leaky=downstream ! \
 			identity name=gate ! {encode} appsink name=frames sync=false async=false max-buffers=1 enable-last-sample=false wait-on-eos=false \
 			split. ! queue max-size-buffers=1 max-size-bytes={MAX_RAW_BYTES} max-size-time=0 leaky=downstream ! \
