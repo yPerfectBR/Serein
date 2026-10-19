@@ -1481,6 +1481,7 @@ async fn run_recoverable(
 						}
 						break;
 					}
+					if connect.is_some() { calls.replay_move(owner_id,&emit)?; }
 					if let Some(channel)=connect && let Some(packet)=calls.channel_info_packet(channel)
 						&& !matches!(timeout(Duration::from_secs(5),socket.send(packet)).await,Ok(Ok(()))) {break;}
 				}
