@@ -6,7 +6,7 @@ use gstreamer_app as app;
 use gstreamer_video::{self as video, VideoFrameExt};
 use std::sync::{
 	Arc,
-	atomic::{AtomicBool, Ordering},
+	atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 const INVALID: &str = "Screen capture returned an unsupported frame";
@@ -64,7 +64,19 @@ impl Mode {
 	}
 }
 
+/// Buffers seen at each stage of the capture pipeline, for the diagnostics log only.
+#[derive(Default)]
+pub(super) struct Counters {
+	pub source: AtomicU64,
+	pub gate_passed: AtomicU64,
+	pub gate_not_ready: AtomicU64,
+	pub gate_no_capacity: AtomicU64,
+	pub frames_sink: AtomicU64,
+	pub preview_sink: AtomicU64,
+}
+
 pub(super) struct Capture {
+	pub counters: Arc<Counters>,
 	pipeline: gst::Pipeline,
 	pub frames: app::AppSink,
 	pub preview: app::AppSink,
@@ -235,17 +247,40 @@ impl Capture {
 					.build(),
 			);
 		}
+		let counters = Arc::new(Counters::default());
+		let count = |pad: gst::Pad, counter: fn(&Counters) -> &AtomicU64| {
+			let counters = counters.clone();
+			pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+				counter(&counters).fetch_add(1, Ordering::Relaxed);
+				gst::PadProbeReturn::Ok
+			});
+		};
+		if let Some(pad) = source.static_pad("src") {
+			count(pad, |c| &c.source);
+		}
+		if let Some(pad) = frames.static_pad("sink") {
+			count(pad, |c| &c.frames_sink);
+		}
+		if let Some(pad) = preview.static_pad("sink") {
+			count(pad, |c| &c.preview_sink);
+		}
+		let gate_counters = counters.clone();
 		bin.by_name("gate")
 			.and_then(|gate| gate.static_pad("src"))
 			.ok_or(UNAVAILABLE)?
 			.add_probe(gst::PadProbeType::BUFFER, move |pad, _| {
 				if stop.load(Ordering::Acquire) || !ready.load(Ordering::Acquire) {
+					gate_counters.gate_not_ready.fetch_add(1, Ordering::Relaxed);
 					keyframe.store(true, Ordering::Release);
 					return gst::PadProbeReturn::Drop;
 				}
 				if !has_capacity() {
+					gate_counters
+						.gate_no_capacity
+						.fetch_add(1, Ordering::Relaxed);
 					return gst::PadProbeReturn::Drop;
 				}
+				gate_counters.gate_passed.fetch_add(1, Ordering::Relaxed);
 				if mode != Mode::Software
 					&& keyframe.swap(false, Ordering::AcqRel)
 					&& !pad.push_event(
@@ -258,6 +293,7 @@ impl Capture {
 				gst::PadProbeReturn::Ok
 			});
 		let capture = Self {
+			counters,
 			pipeline,
 			frames,
 			preview,

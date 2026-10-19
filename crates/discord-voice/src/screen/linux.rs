@@ -383,6 +383,24 @@ pub(super) fn run(
 					pictures_second += u32::from(pulled);
 					withheld_second += withheld;
 					if second.elapsed() >= Duration::from_secs(1) {
+						if std::env::var_os("SEREIN_VOICE_DIAGNOSTICS").is_some_and(|set| set == "1") {
+							let c = &pipeline.counters;
+							use std::sync::atomic::Ordering::Relaxed;
+							note(
+								"pipe_counts",
+								&format!(
+									"source={} gate_passed={} gate_not_ready={} gate_no_capacity={} frames_sink={} preview_sink={} ready={} room={}",
+									c.source.load(Relaxed),
+									c.gate_passed.load(Relaxed),
+									c.gate_not_ready.load(Relaxed),
+									c.gate_no_capacity.load(Relaxed),
+									c.frames_sink.load(Relaxed),
+									c.preview_sink.load(Relaxed),
+									ready.load(Ordering::Acquire),
+									send.capacity() > 0,
+								),
+							);
+						}
 						if ready.load(Ordering::Acquire) && pictures_second <= SLOW_PICTURES {
 							let entry = slow.get_or_insert((second, 0));
 							entry.1 += withheld_second;
