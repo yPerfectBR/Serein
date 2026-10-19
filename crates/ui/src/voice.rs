@@ -2037,6 +2037,13 @@ impl MessagingUi {
 		state: &mut State,
 		commands: &mut Vec<Command>,
 	) {
+		// The server moved this account to another channel: join it, as the official client does.
+		if let Some(channel) = state.voice.follow.take()
+			&& state.voice.active.is_none()
+			&& self.voice_available
+		{
+			self.request_call(state, channel, false, commands);
+		}
 		let Some(switch) = &self.voice_switch else {
 			return;
 		};

@@ -914,6 +914,12 @@ impl Calls {
 			self.watch = None;
 			self.camera = false;
 			emit(Event::Voice(voice::Event::TakenOver { channel, request }))?;
+			// A move (not another device replacing this session) to a channel we know: follow it.
+			if moved
+				&& allowed && let Some(target) = state.channel_id
+			{
+				emit(Event::Voice(voice::Event::Moved { channel: target }))?;
+			}
 		} else if let Some(session) = &secret
 			&& self
 				.active_session
@@ -2115,6 +2121,10 @@ mod tests {
 			));
 			assert!(matches!(
 				events.lock().unwrap()[1],
+				Event::Voice(voice::Event::Moved { channel: Id(21) })
+			));
+			assert!(matches!(
+				events.lock().unwrap()[2],
 				Event::Voice(voice::Event::State {
 					channel: Some(Id(21)),
 					request: None,
@@ -2238,6 +2248,10 @@ mod tests {
 				channel: Id(20),
 				request: 5
 			})
+		));
+		assert!(matches!(
+			events.lock().unwrap()[1],
+			Event::Voice(voice::Event::Moved { channel: Id(21) })
 		));
 	}
 

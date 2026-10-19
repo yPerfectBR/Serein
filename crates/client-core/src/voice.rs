@@ -164,6 +164,8 @@ pub struct State {
 	pub ring_error: Option<(Id, u64, &'static str)>,
 	pub roster: Vec<RosterEntry>,
 	pub preview: Option<StreamPreview>,
+	/// The channel the server moved this account to; the interface joins it (once) to follow.
+	pub follow: Option<Id>,
 	sequence: u64,
 }
 impl State {
@@ -289,6 +291,10 @@ pub enum Event {
 	TakenOver {
 		channel: Id,
 		request: u64,
+	},
+	/// The server moved this account to another voice channel it may join (after a `TakenOver`).
+	Moved {
+		channel: Id,
 	},
 	Departed {
 		channel: Id,
@@ -764,6 +770,11 @@ impl ClientState {
 			}
 			Event::Departed { channel, request } => {
 				self.voice.departed = Some((channel, request));
+			}
+			Event::Moved { channel } => {
+				if self.can_call(channel) {
+					self.voice.follow = Some(channel);
+				}
 			}
 			Event::Snapshot {
 				partial,
@@ -1334,6 +1345,17 @@ mod tests {
 			request,
 		});
 		assert_eq!(state.voice.active.as_ref().unwrap().request, next);
+	}
+	#[test]
+	fn a_server_move_asks_to_follow_only_into_a_channel_that_can_be_joined() {
+		let mut state = stream_preview_state();
+		state.apply_voice(Event::Moved { channel: Id(99) });
+		assert_eq!(
+			state.voice.follow, None,
+			"unknown or forbidden channels are not followed"
+		);
+		state.apply_voice(Event::Moved { channel: Id(20) });
+		assert_eq!(state.voice.follow, Some(Id(20)));
 	}
 	#[test]
 	fn stream_preview_is_scoped_to_the_current_streamer_request() {
