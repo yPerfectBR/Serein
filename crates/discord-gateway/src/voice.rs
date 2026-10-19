@@ -56,6 +56,12 @@ pub(super) struct Calls {
 	sent_state: Option<((bool, bool, bool), Instant)>,
 	/// A coalesced mute/deafen change is sent when this passes; only the newest state goes out.
 	pub(super) state_deadline: Option<Instant>,
+	/// The channel the server just moved this account to, and when; the next join of that channel
+	/// first leaves and re-enters it, because Discord sends no new credentials for a channel the
+	/// account is already in.
+	moved_to: Option<(Id, Instant)>,
+	/// A leave was sent to refresh the credentials of a join; its acknowledgement sends the join.
+	rejoin_after_null: bool,
 	departing: Option<(Id, u64)>,
 	departing_guild: Option<Id>,
 	departing_session: Option<Secret>,
@@ -324,6 +330,16 @@ impl Calls {
 				self.muted = mute || deaf;
 				self.deafened = deaf;
 				self.camera = false;
+				let fresh = self.moved_to.take().is_some_and(|(to, at)| {
+					to == channel && at.elapsed() < Duration::from_secs(30)
+				});
+				if fresh {
+					// Leave first; the acknowledgement (or this deadline) sends the join.
+					self.rejoin_after_null = true;
+					let frame = self.state_frame(None, guild);
+					self.state_deadline = Some(Instant::now() + Duration::from_secs(3));
+					return Ok(Some(frame));
+				}
 				(Some(channel), guild)
 			}
 			Command::AbandonSession { channel, request } => {
@@ -427,6 +443,10 @@ impl Calls {
 	pub(super) fn flush_state(&mut self) -> Option<Frame> {
 		self.state_deadline = None;
 		let (channel, _) = self.active?;
+		if self.rejoin_after_null && self.allowed.get(&channel) == Some(&self.active_guild) {
+			self.rejoin_after_null = false;
+			return Some(self.state_frame(Some(channel), self.active_guild));
+		}
 		if self.allowed.get(&channel) != Some(&self.active_guild)
 			|| self
 				.sent_state
@@ -833,6 +853,11 @@ impl Calls {
 	) -> Result<(), Failure> {
 		let session = state.session_id.take().map(Zeroizing::new);
 		let own = owner == Some(state.user_id);
+		if own && state.channel_id.is_none() && self.rejoin_after_null && self.active.is_some() {
+			// The leave sent to refresh credentials was acknowledged: send the join now.
+			self.state_deadline = Some(Instant::now());
+			return Ok(());
+		}
 		if own && self.departing.is_some() {
 			let departure_session = session
 				.as_ref()
@@ -918,6 +943,7 @@ impl Calls {
 			if moved
 				&& allowed && let Some(target) = state.channel_id
 			{
+				self.moved_to = Some((target, Instant::now()));
 				emit(Event::Voice(voice::Event::Moved { channel: target }))?;
 			}
 		} else if let Some(session) = &secret
@@ -2253,6 +2279,40 @@ mod tests {
 			events.lock().unwrap()[1],
 			Event::Voice(voice::Event::Moved { channel: Id(21) })
 		));
+		// Following the move leaves and re-enters the channel, so Discord sends fresh credentials.
+		events.lock().unwrap().clear();
+		let Some(Frame::Text(leave)) = calls
+			.packet(Command::Join {
+				channel: Id(21),
+				request: 6,
+				ring: false,
+				mute: false,
+				deaf: false,
+			})
+			.unwrap()
+		else {
+			panic!("the follow must send a leave first")
+		};
+		let leave: serde_json::Value = serde_json::from_str(&leave).unwrap();
+		assert!(leave["d"]["channel_id"].is_null());
+		assert_eq!(calls.active, Some((Id(21), 6)));
+		let null_ack = serde_json::to_vec(
+			&json!({"guild_id":Id(10),"channel_id":null,"user_id":Id(1),"session_id":"ours"}),
+		)
+		.unwrap();
+		calls
+			.dispatch("VOICE_STATE_UPDATE", &null_ack, Some(Id(1)), &emit)
+			.unwrap();
+		assert!(
+			events.lock().unwrap().is_empty(),
+			"the acknowledgement of the refresh leave must not end the call"
+		);
+		let Some(Frame::Text(join)) = calls.flush_state() else {
+			panic!("the acknowledgement must release the join")
+		};
+		let join: serde_json::Value = serde_json::from_str(&join).unwrap();
+		assert_eq!(join["d"]["channel_id"], json!(Id(21)));
+		assert!(calls.flush_state().is_none());
 	}
 
 	#[test]
