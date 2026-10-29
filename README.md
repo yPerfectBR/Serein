@@ -1,7 +1,7 @@
 # Serein
 
 <p align="center">
-  <a href="https://github.com/ViceVerse-cz/rustcord">
+  <a href="https://github.com/ViceVerse-cz/Serein">
     <img src="docs/preview.png" alt="Serein Native Discord Client" width="900" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);" />
   </a>
 </p>
@@ -107,7 +107,7 @@ Use `net-im/serein-bin` in the keyword file and emerge command to install the pr
 
 #### 4. Nix (flake)
 
-Nix installs are updated through Nix, not the in-app updater. On macOS the build produces an unsigned, non-notarized `Serein.app`. See the [Nix package guide](nix/README.md) for the development shell and details.
+Nix installs are updated through Nix, not the in-app updater. On macOS the build produces an unsigned, non-notarized `Serein.app`. See the [Nix package guide](packaging/nix/README.md) for the development shell and details.
 
 The repository flake builds Serein from source for `x86_64-linux` and `aarch64-darwin`:
 
@@ -382,7 +382,7 @@ cargo xtask package
 Serein is engineered as a clean multi-crate Cargo workspace, isolating UI rendering from networking, persistence, and service protocols:
 
 ```
-rustcord/
+serein/
 ├── apps/
 │   └── desktop/          # Application entrypoint, CLI flags, window lifecycle
 ├── crates/
@@ -423,7 +423,7 @@ For full details, review the [Storage Policy](docs/storage-policy.md) and [Threa
 - [Authentication & Login Handoff](docs/authentication.md)
 - [Storage Policy & Cache Retention](docs/storage-policy.md)
 - [Platform Support & Build Requirements](docs/platform-support.md)
-- [Nix Package & Development Shell](nix/README.md)
+- [Nix Package & Development Shell](packaging/nix/README.md)
 - [Voice Architecture & Procedure](docs/voice.md)
 - [Design Tokens & UI Styling](docs/design.md)
 - [Extensions & Plugin Architecture](docs/extensions.md)

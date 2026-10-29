@@ -370,29 +370,6 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn forum_attachment_counts_select_singular_and_plural_labels() {
-		for (language, singular, plural) in [
-			(Language::English, "attached file", "attached files"),
-			(Language::German, "angehängte Datei", "angehängte Dateien"),
-			(Language::Spanish, "archivo adjunto", "archivos adjuntos"),
-			(Language::French, "fichier joint", "fichiers joints"),
-			(Language::Italian, "file allegato", "file allegati"),
-			(
-				Language::PortugueseBrazil,
-				"arquivo anexado",
-				"arquivos anexados",
-			),
-		] {
-			for (count, label) in [(1, singular), (2, plural), (10, plural)] {
-				let actual =
-					language.text_with_count("forum-composer-attached-files", Some(count), &[]);
-				let actual = actual.replace(['\u{2068}', '\u{2069}'], "");
-				assert_eq!(actual, format!("{count} {label}"), "{language:?}");
-			}
-		}
-	}
-
-	#[test]
 	fn negotiates_supported_languages_and_falls_back_to_english() {
 		assert_eq!(language_from_tag("cs-CZ"), Language::Czech);
 		assert_eq!(language_from_tag("cs_CZ"), Language::Czech);
@@ -511,81 +488,6 @@ mod tests {
 			message_text(&message),
 			"Welcome, m.artin! Joined the server."
 		);
-	}
-
-	#[test]
-	fn channel_pill_labels_are_localized_in_every_catalog() {
-		for language in Language::ALL {
-			assert_ne!(
-				language.text("channel-pill-thread"),
-				language.text("channel-pill-post"),
-				"{language:?} must distinguish regular threads from forum posts"
-			);
-		}
-		for (key, english, czech) in [
-			("channel-pill-thread", "Thread", "Vlákno"),
-			("channel-pill-forum", "Forum", "Fórum"),
-			("channel-pill-post", "Post", "Příspěvek"),
-			("channel-pill-message", "message", "zpráva"),
-		] {
-			assert_eq!(Language::English.text(key), english);
-			assert_eq!(Language::Czech.text(key), czech);
-			for language in Language::ALL {
-				let label = language.text(key);
-				assert!(
-					!label.is_empty() && !label.starts_with("Unknown localization key:"),
-					"{language:?} {key}: {label}"
-				);
-			}
-		}
-	}
-
-	#[test]
-	fn counts_select_plural_forms() {
-		let since = |language: Language, count| {
-			language
-				.text_with_count(
-					"timeline-unread-banner-new-since",
-					Some(count),
-					&[("time", "23:21")],
-				)
-				.replace(['\u{2068}', '\u{2069}'], "")
-		};
-		assert_eq!(since(Language::English, 1), "1 new message since 23:21");
-		assert_eq!(since(Language::English, 57), "57 new messages since 23:21");
-		assert_eq!(since(Language::Czech, 1), "1 nová zpráva od 23:21");
-		assert_eq!(since(Language::Czech, 3), "3 nové zprávy od 23:21");
-		assert_eq!(since(Language::Czech, 57), "57 nových zpráv od 23:21");
-		assert_eq!(since(Language::Russian, 21), "21 новое сообщение с 23:21");
-		assert_eq!(since(Language::Russian, 12), "12 новых сообщений с 23:21");
-		assert_eq!(since(Language::Polish, 22), "22 nowe wiadomości od 23:21");
-		assert_eq!(since(Language::Polish, 12), "12 nowych wiadomości od 23:21");
-		for language in Language::ALL {
-			for count in [1, 2, 5, 22, 1000] {
-				for key in [
-					"timeline-unread-banner-new-since",
-					"timeline-unread-banner-new-since-more",
-				] {
-					let text = language
-						.text_with_count(key, Some(count), &[("time", "23:21")])
-						.replace(['\u{2068}', '\u{2069}'], "");
-					assert!(
-						text.contains(&count.to_string()) && text.contains("23:21"),
-						"{language:?} {key} {count}: {text}"
-					);
-				}
-				let text = language.text_with_count(
-					"timeline-present-control-new-messages",
-					Some(count),
-					&[],
-				);
-				assert!(
-					text.replace(['\u{2068}', '\u{2069}'], "")
-						.contains(&count.to_string()),
-					"{language:?} {count}: {text}"
-				);
-			}
-		}
 	}
 
 	#[test]

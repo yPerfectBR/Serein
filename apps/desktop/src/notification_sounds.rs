@@ -131,6 +131,7 @@ fn samples(sound: Sound, rate: u32, current: &impl Fn() -> bool) -> Result<Vec<[
 		}
 		Sound::UserJoin => include_bytes!("../../../assets/sounds/discord/user-join.mp3"),
 		Sound::UserLeave => include_bytes!("../../../assets/sounds/discord/user-leave.mp3"),
+		Sound::ViewerJoin => include_bytes!("../../../assets/sounds/discord/viewer-join.mp3"),
 	};
 	if bytes.len() > 128 * 1024 || !(8000..=192000).contains(&rate) {
 		return Err(());
@@ -187,11 +188,12 @@ fn open(
 	finished: Arc<AtomicBool>,
 ) -> Result<(cpal::Stream, Duration), ()> {
 	let device = cpal::default_host().default_output_device().ok_or(())?;
-	let supported = device.default_output_config().map_err(|_| ())?;
+	let supported = platform::audio::output_config(
+		&device,
+		platform::audio::OutputConfigPreference::Notification,
+	)
+	.map_err(|_| ())?;
 	let config = supported.config();
-	if !(8000..=192000).contains(&config.sample_rate) || !(1..=8).contains(&config.channels) {
-		return Err(());
-	}
 	let samples = samples(sound, config.sample_rate, &|| {
 		generation.load(Ordering::Acquire) == request
 	})?;
@@ -384,6 +386,7 @@ mod tests {
 				Sound::OutgoingRing,
 				Sound::UserJoin,
 				Sound::UserLeave,
+				Sound::ViewerJoin,
 			]
 			.map(|s| samples(s, rate, &|| true).unwrap());
 			assert_ne!(cues[0], cues[1]);
@@ -402,6 +405,7 @@ mod tests {
 				(2.3, 2.6),
 				(1.0, 1.2),
 				(0.9, 1.1),
+				(1.5, 1.8),
 			];
 			assert!(
 				Duration::from_secs_f64(cues[9].len() as f64 / f64::from(rate))

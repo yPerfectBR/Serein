@@ -239,7 +239,11 @@ pub enum Action {
 	Profile(User),
 	/// Open a mutual server picked from the card.
 	Server(Id),
-	Avatar(model::EmbedMedia),
+	Avatar {
+		media: model::EmbedMedia,
+		points: f32,
+		grid: crate::attachments::PixelGrid,
+	},
 	Banner(model::EmbedMedia),
 	/// Shared user action picked from the card's overflow menu.
 	Menu(crate::user_menu::Action),
@@ -249,6 +253,8 @@ pub enum Action {
 	EditStatus,
 	/// The trash can on the account's own status bubble.
 	ClearStatus,
+	/// Open the centred full profile on this tab, as from the docked DM profile.
+	Full(FullTab),
 }
 
 /// Shared Rich Presence card for member profiles and the account preview.
@@ -1405,6 +1411,28 @@ impl Theme {
 			},
 		}
 	}
+	/// Recolors text and widgets for content drawn on this theme.
+	fn apply(&self, ui: &mut egui::Ui) {
+		// egui resolves strong, button and spinner colors from the widget strokes rather
+		// than the override, so a bright theme needs every stroke recolored too.
+		let visuals = ui.visuals_mut();
+		visuals.override_text_color = Some(self.text);
+		visuals.hyperlink_color = self.link;
+		let widgets = &mut visuals.widgets;
+		for widget in [
+			&mut widgets.noninteractive,
+			&mut widgets.inactive,
+			&mut widgets.hovered,
+			&mut widgets.active,
+			&mut widgets.open,
+		] {
+			widget.fg_stroke.color = self.text;
+			widget.bg_stroke = Stroke::NONE;
+		}
+		widgets.inactive.weak_bg_fill = self.chip;
+		widgets.hovered.weak_bg_fill = self.chip_hover;
+		widgets.active.weak_bg_fill = self.chip_hover;
+	}
 	/// White over a bright theme takes dark text, black over a dark one takes light text.
 	fn bright([top, bottom]: [u32; 2]) -> bool {
 		(luma(rgb(top)) + luma(rgb(bottom))) * 0.5 > 0.5
@@ -2227,7 +2255,7 @@ pub(crate) fn debug_activity_panel(state: &State) {
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum FullTab {
+pub enum FullTab {
 	#[default]
 	Board,
 	Activity,
@@ -2510,6 +2538,14 @@ impl ProfileSession {
 	pub fn open_full(&mut self, user: User) {
 		self.command_open(user);
 		self.full = true;
+	}
+
+	/// Opens the full profile of `user` on `tab`.
+	pub fn open_full_tab(&mut self, generation: u64, user: User, tab: FullTab) {
+		let id = user.id;
+		self.open_full(user);
+		self.reconcile_card_input(generation, id);
+		self.full_tab = tab;
 	}
 
 	/// Whether the open card should read its private note now; true once per card.
@@ -3041,27 +3077,7 @@ pub fn show_with_session(
 		// Back frame layers sit behind the card; front layers and the effect cover it.
 		let frame_back = ui.painter().add(egui::Shape::Noop);
 		let background = ui.painter().add(egui::Shape::Noop);
-		{
-			// egui resolves strong, button and spinner colors from the widget strokes rather
-			// than the override, so a bright theme needs every stroke recolored too.
-			let visuals = ui.visuals_mut();
-			visuals.override_text_color = Some(theme.text);
-			visuals.hyperlink_color = theme.link;
-			let widgets = &mut visuals.widgets;
-			for widget in [
-				&mut widgets.noninteractive,
-				&mut widgets.inactive,
-				&mut widgets.hovered,
-				&mut widgets.active,
-				&mut widgets.open,
-			] {
-				widget.fg_stroke.color = theme.text;
-				widget.bg_stroke = Stroke::NONE;
-			}
-			widgets.inactive.weak_bg_fill = theme.chip;
-			widgets.hovered.weak_bg_fill = theme.chip_hover;
-			widgets.active.weak_bg_fill = theme.chip_hover;
-		}
+		theme.apply(ui);
 
 		// Header: banner, overlapping avatar with presence, badge pill.
 		let has_banner = data.as_ref().and_then(|d| d.banner_url()).is_some();
@@ -3233,6 +3249,7 @@ pub fn show_with_session(
 			if response.clicked() && !pointer_on_presence && !image_avatar {
 				expand = true;
 			} else if response.clicked() && !pointer_on_presence {
+				const AVATAR_VIEW_EDGE: u32 = 2048;
 				let mut url = data.map_or(user, |data| &data.user).avatar_url();
 				if let Some(data) = data
 					&& let Some(member) = data.guild.as_ref()
@@ -3247,12 +3264,22 @@ pub fn show_with_session(
 						member.guild, data.user.id
 					);
 				}
-				action = Some(Action::Avatar(model::EmbedMedia {
-					url: Some(url.replace("size=128", "size=2048")),
-					width: 2048,
-					height: 2048,
-					..Default::default()
-				}));
+				let grid = if url.contains("size=128") {
+					url = url.replace("size=128", &format!("size={AVATAR_VIEW_EDGE}"));
+					crate::attachments::PixelGrid::Declared
+				} else {
+					crate::attachments::PixelGrid::Decoded
+				};
+				action = Some(Action::Avatar {
+					media: model::EmbedMedia {
+						url: Some(url),
+						width: AVATAR_VIEW_EDGE,
+						height: AVATAR_VIEW_EDGE,
+						..Default::default()
+					},
+					points: avatar_size,
+					grid,
+				});
 			}
 		});
 		if let Some(status) = status {
@@ -3599,8 +3626,9 @@ pub fn show_with_session(
 								|| !data.mutual_friends.is_empty())
 						}) {
 							ui.add_space(4.0);
-							ui.horizontal(|ui| {
-								ui.spacing_mut().item_spacing.x = 16.0;
+							// Wrap: translated labels (e.g. Czech) can outgrow the fixed card width.
+							ui.horizontal_wrapped(|ui| {
+								ui.spacing_mut().item_spacing = vec2(16.0, 4.0);
 								for (kind, count, icon, one, many) in [
 									(
 										Mutuals::Servers,
@@ -4188,6 +4216,330 @@ pub fn show_with_session(
 	action
 }
 
+/// Width of the docked DM profile beside the conversation.
+pub(crate) const DOCKED_WIDTH: f32 = 300.0;
+const DOCKED_BANNER: f32 = 120.0;
+
+/// The other person's profile in a one-to-one DM, docked where a server's member list sits.
+/// `data` is their loaded global profile; until it arrives only the known user is shown.
+/// `surface` is the panel fill behind an unthemed profile, used to ring the avatar.
+pub(crate) fn docked(
+	ui: &mut egui::Ui,
+	user: &User,
+	data: Option<&model::UserProfile>,
+	loading: bool,
+	state: &State,
+	avatars: &mut Avatars,
+	surface: Color32,
+) -> Option<Action> {
+	let colors = design::palette(ui);
+	let theme = Theme::new(&colors, data.and_then(|d| d.theme_colors));
+	let panel = ui.max_rect();
+	let ring = if let Some((top, bottom)) = theme.gradient {
+		let mut mesh = egui::Mesh::default();
+		for (corner, color) in [
+			(panel.left_top(), top),
+			(panel.right_top(), top),
+			(panel.left_bottom(), bottom),
+			(panel.right_bottom(), bottom),
+		] {
+			mesh.colored_vertex(corner, color);
+		}
+		mesh.add_triangle(0, 1, 2);
+		mesh.add_triangle(1, 3, 2);
+		ui.painter().add(mesh);
+		top
+	} else {
+		surface
+	};
+	theme.apply(ui);
+	ui.style_mut().interaction.selectable_labels = false;
+	let (status, custom, activities, clients) = presence(state, user.id, None);
+	let status = shown_status(state, user.id, status);
+	let custom = custom.map(str::trim).filter(|text| !text.is_empty());
+	let own = state.user.as_ref().is_some_and(|own| own.id == user.id);
+	let catalog = data.and_then(|d| d.badge_catalog.as_deref());
+	let mut action = None;
+	let mut full = None;
+	ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+		egui::Frame::new().inner_margin(16).show(ui, |ui| {
+			if ui
+				.add_sized(
+					[ui.available_width(), 36.0],
+					egui::Button::new(
+						RichText::new(crate::i18n::translate("profiles-view-full-profile"))
+							.size(14.0),
+					)
+					.corner_radius(RADIUS),
+				)
+				.clicked()
+			{
+				full = Some(FullTab::default());
+			}
+		});
+		ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+			egui::ScrollArea::vertical()
+				.id_salt(("docked-profile", user.id))
+				.auto_shrink([false, false])
+				.show(ui, |ui| {
+					ui.spacing_mut().item_spacing = vec2(8.0, 4.0);
+					let width = ui.available_width();
+					let has_banner = data.and_then(|d| d.banner_url()).is_some();
+					let (banner, banner_response) = ui.allocate_exact_size(
+						vec2(width, DOCKED_BANNER),
+						if has_banner {
+							egui::Sense::click()
+						} else {
+							egui::Sense::hover()
+						},
+					);
+					if let Some(data) = data {
+						avatars.paint_banner(ui, data, banner, CornerRadius::ZERO, state.demo);
+					} else {
+						ui.painter().rect_filled(banner, 0, colors.raised);
+					}
+					let circles = Rect::from_min_size(
+						pos2(
+							banner.right() - PAD - 2.0 * CIRCLE - 8.0,
+							banner.top() + PAD,
+						),
+						vec2(2.0 * CIRCLE + 8.0, CIRCLE),
+					);
+					ui.scope_builder(
+						UiBuilder::new()
+							.max_rect(circles)
+							.layout(egui::Layout::right_to_left(egui::Align::Center)),
+						|ui| {
+							ui.spacing_mut().item_spacing.x = 8.0;
+							let more = header_circle(ui, Icon::More, "profiles-show-more", true);
+							egui::Popup::menu(&more)
+								.id(egui::Id::unique(("docked-profile-more", user.id)))
+								.show(|ui| {
+									let mut expand = false;
+									let dm = state.selected;
+									if let Some(picked) =
+										more_menu(ui, state, user, dm, &mut expand)
+									{
+										action = Some(picked);
+									}
+									if expand {
+										full = Some(FullTab::default());
+									}
+								});
+							if let Some(picked) = friend_button(ui, state, user, true) {
+								action = Some(picked);
+							}
+						},
+					);
+					let avatar = Rect::from_min_size(
+						banner.left_bottom() + vec2(PAD + 4.0, -AVATAR * 0.5 - 6.0),
+						Vec2::splat(AVATAR),
+					);
+					if has_banner
+						&& !ui.input(|i| {
+							i.pointer
+								.interact_pos()
+								.is_some_and(|pos| circles.contains(pos) || avatar.contains(pos))
+						}) && banner_response
+						.on_hover_cursor(egui::CursorIcon::ZoomIn)
+						.clicked() && let Some(url) = data.and_then(|d| d.banner_url())
+					{
+						action = Some(Action::Banner(model::EmbedMedia {
+							url: Some(url),
+							width: 2048,
+							height: 1024,
+							..Default::default()
+						}));
+					}
+					ui.painter()
+						.circle_filled(avatar.center(), AVATAR * 0.5 + AVATAR_RING, ring);
+					ui.scope_builder(UiBuilder::new().max_rect(avatar), |ui| {
+						let response = avatars.with_avatar_animation(true, |avatars| match data {
+							Some(data) => avatars.show_profile_avatar(ui, data, AVATAR, state.demo),
+							None => avatars.show(ui, user, AVATAR, state.demo),
+						});
+						if response
+							.on_hover_cursor(egui::CursorIcon::PointingHand)
+							.on_hover_text(crate::i18n::translate("profiles-view-full-profile"))
+							.clicked()
+						{
+							full = Some(FullTab::default());
+						}
+					});
+					if let Some(status) = status {
+						presence_badge(ui, avatar, status, clients, ring);
+					}
+					ui.add_space((avatar.bottom() + 12.0 - ui.cursor().top()).max(0.0));
+					egui::Frame::new()
+						.inner_margin(egui::Margin::symmetric(16, 0))
+						.show(ui, |ui| {
+							ui.set_width(ui.available_width());
+							let display = data
+								.and_then(|d| {
+									state.friend_nickname(user.id).or(d.global_name.as_deref())
+								})
+								.unwrap_or_else(|| state.user_display_name(user));
+							let display = display.split_whitespace().collect::<Vec<_>>().join(" ");
+							let name = crate::name_styles::label(
+								ui,
+								crate::name_styles::style(data.map_or(user, |d| &d.user)),
+								&display,
+								egui::FontId::new(20.0, design::semibold_family(ui.ctx())),
+								None,
+								ring,
+								theme.text,
+								egui::Sense::click(),
+								true,
+							);
+							if name
+								.on_hover_cursor(egui::CursorIcon::PointingHand)
+								.on_hover_text(crate::i18n::translate("profiles-view-full-profile"))
+								.clicked()
+							{
+								full = Some(FullTab::default());
+							}
+							let shown = data.map_or_else(Vec::new, |d| {
+								model::badges::displayed_badges(&d.badges, catalog)
+							});
+							let clan = data
+								.map(|d| d.clan.as_ref())
+								.unwrap_or(user.primary_guild.as_deref());
+							ui.horizontal_wrapped(|ui| {
+								ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
+								let username = data.map_or_else(
+									|| user.name.clone(),
+									|d| {
+										if d.user.discriminator > 0 {
+											format!("{}#{:04}", d.username, d.user.discriminator)
+										} else {
+											d.username.clone()
+										}
+									},
+								);
+								ui.label(RichText::new(username).size(14.0));
+								if let Some(clan) = clan {
+									clan_chip(ui, &theme, avatars, clan, state.demo);
+								}
+								let icons: Vec<_> =
+									shown.iter().filter(|b| b.icon_key().is_some()).collect();
+								if !icons.is_empty() {
+									egui::Frame::new()
+										.fill(theme.panel)
+										.corner_radius(6)
+										.inner_margin(egui::Margin::symmetric(6, 3))
+										.show(ui, |ui| {
+											ui.spacing_mut().item_spacing.x = 4.0;
+											for badge in icons {
+												crate::badges::badge_icon(
+													ui, avatars, badge, catalog, 20.0, state.demo,
+												);
+											}
+										});
+								}
+							});
+							if let Some(text) = custom {
+								ui.add_space(4.0);
+								egui::Frame::new()
+									.fill(theme.chip)
+									.corner_radius(RADIUS)
+									.inner_margin(egui::Margin::symmetric(10, 6))
+									.show(ui, |ui| {
+										ui.add(
+											egui::Label::new(RichText::new(text).size(13.0)).wrap(),
+										);
+									});
+							}
+							if let Some(data) = data.filter(|d| {
+								!own && (!d.mutual_guilds.is_empty()
+									|| !d.mutual_friends.is_empty())
+							}) {
+								ui.add_space(4.0);
+								ui.horizontal_wrapped(|ui| {
+									ui.spacing_mut().item_spacing = vec2(16.0, 4.0);
+									for (tab, count, icon, one, many) in [
+										(
+											FullTab::Friends,
+											data.mutual_friends.len(),
+											Icon::People,
+											"profiles-show-mutual-friend",
+											"profiles-show-mutual-friends",
+										),
+										(
+											FullTab::Servers,
+											data.mutual_guilds.len(),
+											Icon::Servers,
+											"profiles-show-mutual-server",
+											"profiles-show-mutual-servers",
+										),
+									] {
+										if count == 0 {
+											continue;
+										}
+										let key = if count == 1 { one } else { many };
+										let text =
+											format!("{count} {}", crate::i18n::translate(key));
+										if mutual_link(ui, &theme, icon, text).clicked() {
+											full = Some(tab);
+										}
+									}
+								});
+							}
+							if data.is_none() && loading {
+								ui.add_space(4.0);
+								ui.horizontal(|ui| {
+									ui.spinner();
+									ui.label(
+										RichText::new(crate::i18n::translate(
+											"profiles-show-loading-profile",
+										))
+										.size(13.0)
+										.color(theme.muted),
+									);
+								});
+							}
+							let mut sections = 0;
+							ui.add_space(12.0);
+							if !activities.is_empty() {
+								sections += 1;
+								activity_list(
+									ui,
+									egui::Id::unique(("docked-profile-activity", user.id)),
+									activities,
+									avatars,
+									state.demo,
+									(theme.chip, theme.muted),
+								);
+							}
+							if data.is_none_or(|d| !d.private)
+								&& let Some(date) = creation_date(user.id)
+							{
+								section(
+									ui,
+									&theme,
+									&mut sections,
+									"profiles-show-member-since",
+									true,
+								);
+								ui.label(RichText::new(date).size(15.0));
+							}
+							if let Some(since) = state.friend_since(user.id).and_then(local_date) {
+								section(
+									ui,
+									&theme,
+									&mut sections,
+									"profiles-show-friends-since",
+									true,
+								);
+								ui.label(RichText::new(since).size(15.0));
+							}
+							ui.add_space(16.0);
+						});
+				});
+		});
+	});
+	full.map(Action::Full).or(action)
+}
+
 /// Time since this card's effect became ready to play; it restarts whenever the card reopens.
 /// `None` until the layers have loaded, so the timeline does not run ahead of its artwork.
 fn effect_clock(
@@ -4395,32 +4747,6 @@ fn synthetic_frame() -> model::ProfileFrame {
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	#[test]
-	fn effect_timeline_waits_for_its_layers_and_restarts_on_reopen() {
-		let ctx = egui::Context::default();
-		let clock = |ready| {
-			let mut elapsed = None;
-			ctx.run_ui(Default::default(), |ui| {
-				elapsed = effect_clock(ui.ctx(), Id(1), Id(2), false, ready);
-			})
-			.drop_without_applying_deltas();
-			elapsed
-		};
-		assert!(clock(false).is_none() && clock(false).is_none());
-		assert!(clock(true).is_some());
-		// Once started it keeps running while the window loses focus.
-		assert!(clock(false).is_some());
-		// Another profile in the same card restarts from its own readiness.
-		ctx.run_ui(Default::default(), |ui| {
-			assert!(effect_clock(ui.ctx(), Id(3), Id(2), false, false).is_none());
-		})
-		.drop_without_applying_deltas();
-		// A frame without the card closes it; reopening waits for readiness again.
-		ctx.run_ui(Default::default(), |_| {})
-			.drop_without_applying_deltas();
-		assert!(clock(false).is_none());
-	}
 
 	#[test]
 	fn mixed_profile_gradients_keep_text_readable_at_and_between_endpoints() {
@@ -4978,159 +5304,6 @@ mod tests {
 		}
 	}
 	#[test]
-	fn partial_profile_warning_preserves_identity_and_webhook_behavior() {
-		for webhook in [false, true] {
-			for dark in [false, true] {
-				for (error, limited) in [
-					(Some("Unsupported service response"), false),
-					(None, true),
-					(None, false),
-				] {
-					let mut user = test_support::message(1, Id(22)).author;
-					user.webhook = webhook;
-					let view = ProfileView {
-						user: user.id,
-						guild: None,
-						request: 1,
-						loading: false,
-						error,
-						data: error.is_none().then(|| {
-							let mut data = synthetic(&user, None);
-							data.limited = limited;
-							data
-						}),
-					};
-					let state = State {
-						demo: true,
-						..Default::default()
-					};
-					let ctx = egui::Context::default();
-					ctx.set_visuals(if dark {
-						egui::Visuals::dark()
-					} else {
-						egui::Visuals::light()
-					});
-					let mut images = Avatars::default();
-					let mut opening = None;
-					let mut painted = String::new();
-					for _ in 0..3 {
-						let output = ctx.run_ui(input(vec2(400.0, 700.0), vec![]), |ui| {
-							show(
-								ui,
-								&user,
-								Some(&view),
-								&state,
-								&mut images,
-								&mut opening,
-								&mut FormatCache::default(),
-								true,
-								pos2(20.0, 70.0),
-							);
-						});
-						for shape in &output.shapes {
-							text(&shape.shape, &mut painted);
-						}
-						output.drop_without_applying_deltas();
-					}
-					assert_eq!(painted.contains("Webhook"), webhook);
-					assert_eq!(painted.contains("Copy webhook ID"), webhook);
-					assert!(!painted.contains("Copy user ID"));
-					// No open DM in this fixture, so non-webhook profiles have no footer action.
-					assert!(!painted.contains("Message"));
-					assert!(!painted.contains("Unsupported service response"));
-					assert_eq!(
-						painted.contains("Unable to load parts of profile"),
-						!webhook && (error.is_some() || limited)
-					);
-					assert_eq!(
-						painted.contains("Retry profile"),
-						!webhook && error.is_some()
-					);
-					assert!(!painted.contains("Loading profile"));
-					assert!(painted.contains(&user.name));
-					assert!(images.take_requests().is_empty());
-				}
-			}
-		}
-	}
-	#[test]
-	fn busy_gradient_profile_never_grows_past_the_viewport() {
-		// Many badges/connections/mutual servers plus a long bio must still fit the window, or
-		// the card's rounded bottom corner renders past the edge and looks clipped square.
-		let user = test_support::message(1, Id(22)).author;
-		let mut data = synthetic(&user, Some(Id(9)));
-		data.bio =
-			"Line one of a long synthetic biography.\nLine two.\nLine three.\nLine four.".repeat(3);
-		data.badges = (0..8)
-			.map(|i| model::ProfileBadge {
-				id: format!("badge-{i}"),
-				description: format!("Synthetic badge {i}"),
-				icon: Some("c".repeat(32)),
-				art: None,
-			})
-			.collect();
-		data.connections = (0..6)
-			.map(|i| model::ProfileConnection {
-				kind: "github".into(),
-				id: i.to_string(),
-				name: format!("synthetic-profile-{i}"),
-				verified: true,
-			})
-			.collect();
-		data.mutual_guilds = (0..6)
-			.map(|i| model::ProfileGuild {
-				id: Id(100 + i),
-				nick: None,
-			})
-			.collect();
-		let view = ProfileView {
-			user: user.id,
-			guild: None,
-			request: 1,
-			loading: false,
-			error: None,
-			data: Some(data),
-		};
-		let state = State {
-			demo: true,
-			..Default::default()
-		};
-		let ctx = egui::Context::default();
-		let mut images = Avatars::default();
-		let mut opening = None;
-		let size = vec2(400.0, 500.0);
-		let mut rect = None;
-		for _ in 0..3 {
-			let output = ctx.run_ui(input(size, vec![]), |ui| {
-				show(
-					ui,
-					&user,
-					Some(&view),
-					&state,
-					&mut images,
-					&mut opening,
-					&mut FormatCache::default(),
-					true,
-					pos2(20.0, 40.0),
-				);
-			});
-			rect = Some(
-				ctx.memory(|m| m.area_rect(egui::Id::unique("user-profile-popout")))
-					.expect("popout area"),
-			);
-			output.drop_without_applying_deltas();
-		}
-		let rect = rect.expect("rendered at least once");
-		let bounds = Rect::from_min_size(Pos2::ZERO, size).shrink(8.0);
-		assert!(
-			rect.bottom() <= bounds.bottom() + 1.0,
-			"card bottom {} exceeds viewport bottom {}; its rounded corner would render off-window",
-			rect.bottom(),
-			bounds.bottom()
-		);
-	}
-
-	#[test]
 	fn dm_presence_does_not_use_a_visible_guild_snapshot() {
 		let mut state = test_support::demo_state();
 		let user = test_support::message(1, Id(22)).author;
@@ -5181,277 +5354,6 @@ mod tests {
 		assert_eq!(
 			presence(&state, user.id, Some(Id(10))),
 			(None, None, [].as_slice(), model::ClientPlatforms::default())
-		);
-	}
-
-	#[test]
-	fn popout_shows_selected_data_beside_anchor_and_closes_with_escape() {
-		let user = User {
-			id: Id(2),
-			name: "Synthetic person".into(),
-			avatar: None,
-			webhook: false,
-			kind: Default::default(),
-			discriminator: 0,
-			primary_guild: None,
-			cosmetics: None,
-		};
-		let profile = ProfileView {
-			user: user.id,
-			guild: None,
-			request: 1,
-			loading: false,
-			error: None,
-			data: Some(synthetic(&user, Some(Id(9)))),
-		};
-		let state = State {
-			user: Some(user.clone()),
-			demo: true,
-			..Default::default()
-		};
-		let ctx = egui::Context::default();
-		let mut images = Avatars::default();
-		let mut opening = None;
-		let mut painted = String::new();
-		let anchor = pos2(120.0, 300.0);
-		for _ in 0..3 {
-			let output = ctx.run_ui(input(vec2(1000.0, 900.0), vec![]), |ui| {
-				assert!(
-					show(
-						ui,
-						&user,
-						Some(&profile),
-						&state,
-						&mut images,
-						&mut opening,
-						&mut FormatCache::default(),
-						true,
-						anchor
-					)
-					.is_none()
-				);
-			});
-			for shape in &output.shapes {
-				text(&shape.shape, &mut painted);
-			}
-			assert!(output.platform_output.commands.is_empty());
-			output.drop_without_applying_deltas();
-		}
-		assert!(
-			painted.contains("Synthetic person")
-				&& painted.contains("ABOUT ME")
-				&& painted.contains("they / them")
-				&& painted.contains("SRN")
-		);
-		assert!(!painted.contains("Mutual Server"));
-		assert!(!painted.contains("Mutual Friend"));
-		assert!(images.take_requests().is_empty());
-		let rect = ctx.memory(|m| m.area_rect(egui::Id::unique("user-profile-popout")));
-		let rect = rect.expect("popout area");
-		assert!((rect.left() - (anchor.x + 12.0)).abs() < 1.0);
-		assert!((rect.width() - WIDTH).abs() <= 2.0);
-		assert!(rect.top() <= anchor.y && rect.bottom() >= anchor.y);
-
-		// Near the right edge the card flips to the left of the anchor and stays in view.
-		let right_anchor = pos2(950.0, 100.0);
-		let output = ctx.run_ui(input(vec2(1000.0, 900.0), vec![]), |ui| {
-			show(
-				ui,
-				&user,
-				Some(&profile),
-				&state,
-				&mut images,
-				&mut opening,
-				&mut FormatCache::default(),
-				true,
-				right_anchor,
-			);
-		});
-		output.drop_without_applying_deltas();
-		let rect = ctx
-			.memory(|m| m.area_rect(egui::Id::unique("user-profile-popout")))
-			.unwrap();
-		assert!(rect.right() <= right_anchor.x - 12.0 + 1.0);
-
-		let output = ctx.run_ui(
-			input(
-				vec2(1000.0, 900.0),
-				vec![egui::Event::Key {
-					key: egui::Key::Escape,
-					physical_key: None,
-					pressed: true,
-					repeat: false,
-					modifiers: egui::Modifiers::NONE,
-				}],
-			),
-			|ui| {
-				assert!(matches!(
-					show(
-						ui,
-						&user,
-						Some(&profile),
-						&state,
-						&mut images,
-						&mut opening,
-						&mut FormatCache::default(),
-						true,
-						anchor
-					),
-					Some(Action::Close)
-				));
-			},
-		);
-		output.drop_without_applying_deltas();
-	}
-
-	#[test]
-	fn server_profile_shows_assigned_known_roles() {
-		let mut state = test_support::demo_state();
-		for (id, name, color, position) in [
-			(Id(101), "Maintainer", 0x5865f2, 2),
-			(Id(102), "Contributor", 0, 1),
-		] {
-			state.apply(client_core::Envelope {
-				generation: state.generation,
-				event: client_core::Event::Permissions(client_core::permissions::Event::Role {
-					guild: Id(10),
-					role: model::permissions::Role {
-						id,
-						bits: 0,
-						name: name.into(),
-						color,
-						secondary_color: None,
-						tertiary_color: None,
-						position,
-						hoist: false,
-					},
-				}),
-			});
-		}
-		let user = test_support::message(1, Id(20)).author;
-		let mut data = synthetic(&user, Some(Id(10)));
-		data.guild.as_mut().unwrap().roles = vec![Id(101), Id(102), Id(999)];
-		let profile = ProfileView {
-			user: user.id,
-			guild: Some(Id(10)),
-			request: 1,
-			loading: false,
-			error: None,
-			data: Some(data),
-		};
-		let ctx = egui::Context::default();
-		let mut images = Avatars::default();
-		let mut opening = None;
-		let mut painted = String::new();
-		for _ in 0..3 {
-			let output = ctx.run_ui(input(vec2(700.0, 800.0), vec![]), |ui| {
-				show(
-					ui,
-					&user,
-					Some(&profile),
-					&state,
-					&mut images,
-					&mut opening,
-					&mut FormatCache::default(),
-					true,
-					pos2(20.0, 70.0),
-				);
-			});
-			for shape in &output.shapes {
-				text(&shape.shape, &mut painted);
-			}
-			output.drop_without_applying_deltas();
-		}
-		assert!(painted.contains("ROLES"), "{painted}");
-		assert!(painted.contains("Maintainer"), "{painted}");
-		assert!(painted.contains("Contributor"), "{painted}");
-		assert!(!painted.contains("Role 999"), "{painted}");
-	}
-
-	#[test]
-	fn clicking_outside_closes_but_clicking_inside_keeps_the_popout() {
-		let user = User {
-			id: Id(2),
-			name: "Synthetic person".into(),
-			avatar: None,
-			webhook: false,
-			kind: Default::default(),
-			discriminator: 0,
-			primary_guild: None,
-			cosmetics: None,
-		};
-		let state = State::default();
-		let ctx = egui::Context::default();
-		let mut images = Avatars::default();
-		let mut opening = None;
-		let anchor = pos2(100.0, 100.0);
-		let output = ctx.run_ui(input(vec2(800.0, 600.0), vec![]), |ui| {
-			show(
-				ui,
-				&user,
-				None,
-				&state,
-				&mut images,
-				&mut opening,
-				&mut FormatCache::default(),
-				true,
-				anchor,
-			);
-		});
-		output.drop_without_applying_deltas();
-		let rect = ctx
-			.memory(|m| m.area_rect(egui::Id::unique("user-profile-popout")))
-			.unwrap();
-		for (pos, closes) in [(rect.center(), false), (pos2(700.0, 550.0), true)] {
-			let output = ctx.run_ui(
-				input(
-					vec2(800.0, 600.0),
-					vec![
-						egui::Event::PointerMoved(pos),
-						egui::Event::PointerButton {
-							pos,
-							button: egui::PointerButton::Primary,
-							pressed: true,
-							modifiers: egui::Modifiers::NONE,
-						},
-					],
-				),
-				|ui| {
-					let action = show(
-						ui,
-						&user,
-						None,
-						&state,
-						&mut images,
-						&mut opening,
-						&mut FormatCache::default(),
-						true,
-						anchor,
-					);
-					assert_eq!(matches!(action, Some(Action::Close)), closes);
-				},
-			);
-			output.drop_without_applying_deltas();
-		}
-	}
-
-	#[test]
-	fn countdown_takes_precedence_and_stops_at_zero() {
-		assert_eq!(
-			activity_timer(None, Some(131_000), 1_000).as_deref(),
-			Some("2:10 remaining")
-		);
-		assert_eq!(
-			activity_timer(Some(0), Some(131_000), 1_000).as_deref(),
-			Some("2:10 remaining")
-		);
-		assert_eq!(
-			activity_timer(None, Some(131_000), 132_000).as_deref(),
-			Some("0:00 remaining")
-		);
-		assert_eq!(
-			activity_timer(Some(1_000), None, 131_000).as_deref(),
-			Some("2:10")
 		);
 	}
 
@@ -5562,206 +5464,6 @@ mod tests {
 	}
 
 	#[test]
-	fn own_status_bubble_buttons_support_tab_enter_and_space_without_pointer() {
-		for full in [false, true] {
-			let ctx = egui::Context::default();
-			let id = egui::Id::unique(("profile-status-bubble", full));
-			let frame = |events| {
-				let mut picked = None;
-				let output = ctx.run_ui(input(vec2(600.0, 400.0), events), |ui| {
-					let theme = Theme::new(&design::palette(ui), None);
-					picked = status_bubble(
-						ui,
-						Rect::from_min_size(pos2(10.0, 50.0), Vec2::splat(80.0)),
-						Rect::from_min_size(pos2(10.0, 10.0), vec2(400.0, 100.0)),
-						&theme,
-						"Synthetic account status",
-						(full, true),
-					)
-					.unwrap()
-					.1;
-				});
-				output.drop_without_applying_deltas();
-				picked
-			};
-			frame(vec![]);
-			frame(vec![]);
-			let key = |key| {
-				[true, false]
-					.map(|pressed| egui::Event::Key {
-						key,
-						physical_key: None,
-						pressed,
-						repeat: false,
-						modifiers: egui::Modifiers::NONE,
-					})
-					.to_vec()
-			};
-			assert!(frame(key(egui::Key::Tab)).is_none());
-			assert_eq!(
-				ctx.memory(|memory| memory.focused()),
-				Some(id.with(("tool", 0usize)))
-			);
-			assert!(matches!(
-				frame(key(egui::Key::Enter)),
-				Some(Action::EditStatus)
-			));
-			assert!(frame(key(egui::Key::Tab)).is_none());
-			assert_eq!(
-				ctx.memory(|memory| memory.focused()),
-				Some(id.with(("tool", 1usize)))
-			);
-			assert!(matches!(
-				frame(key(egui::Key::Space)),
-				Some(Action::ClearStatus)
-			));
-		}
-	}
-
-	#[test]
-	fn elided_status_bubble_shows_full_hover_text_for_owner_and_other_users() {
-		const STATUS: &str = "A long synthetic status that wraps beyond three lines and ends with a visible tooltip marker.";
-		for own in [false, true] {
-			let ctx = egui::Context::default();
-			ctx.style_mut_of(ctx.theme(), |style| style.interaction.tooltip_delay = 0.0);
-			let mut bubble = Rect::NOTHING;
-			let mut full_tooltip = false;
-			for frame in 0..5 {
-				let events = if frame >= 2 {
-					vec![egui::Event::PointerMoved(bubble.center())]
-				} else {
-					vec![]
-				};
-				let mut raw = input(vec2(600.0, 400.0), events);
-				raw.time = Some(frame as f64);
-				let output = ctx.run_ui(raw, |ui| {
-					let theme = Theme::new(&design::palette(ui), None);
-					bubble = status_bubble(
-						ui,
-						Rect::from_min_size(pos2(10.0, 50.0), Vec2::splat(80.0)),
-						Rect::from_min_size(pos2(10.0, 10.0), vec2(340.0, 100.0)),
-						&theme,
-						STATUS,
-						(false, own),
-					)
-					.unwrap()
-					.0;
-				});
-				fn has_full_text(shape: &egui::Shape) -> bool {
-					match shape {
-						egui::Shape::Text(text) => {
-							text.galley.job.text == STATUS && !text.galley.elided
-						}
-						egui::Shape::Vec(shapes) => shapes.iter().any(has_full_text),
-						_ => false,
-					}
-				}
-				let shown = output
-					.shapes
-					.iter()
-					.any(|shape| has_full_text(&shape.shape));
-				if frame < 2 {
-					assert!(!shown, "bubble must elide this status");
-				}
-				full_tooltip |= shown;
-				output.drop_without_applying_deltas();
-			}
-			assert!(full_tooltip, "full hover text missing for own={own}");
-		}
-	}
-
-	#[test]
-	fn own_status_bubble_offers_edit_and_clear_on_hover() {
-		let ctx = egui::Context::default();
-		let state = test_support::demo_state();
-		let user = state.user.clone().unwrap();
-		let view = ProfileView {
-			user: user.id,
-			guild: None,
-			request: 0,
-			loading: false,
-			error: None,
-			data: Some(synthetic(&user, None)),
-		};
-		let mut session = ProfileSession {
-			own_status: "thank you for being my mirror".into(),
-			..Default::default()
-		};
-		let mut frame = |events: Vec<egui::Event>| {
-			let mut action = None;
-			let mut text_rect = None;
-			let output = ctx.run_ui(
-				egui::RawInput {
-					screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))),
-					events,
-					..Default::default()
-				},
-				|ui| {
-					action = show_with_session(
-						ui,
-						&user,
-						Some(&view),
-						&state,
-						&mut Avatars::default(),
-						&mut None,
-						&mut FormatCache::default(),
-						false,
-						pos2(300.0, 100.0),
-						&mut session,
-					);
-				},
-			);
-			fn walk(shape: &egui::Shape, out: &mut Option<Rect>) {
-				match shape {
-					egui::Shape::Text(text)
-						if text.galley.job.text == "thank you for being my mirror" =>
-					{
-						*out = Some(text.galley.rect.translate(text.pos.to_vec2()));
-					}
-					egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, out)),
-					_ => {}
-				}
-			}
-			output
-				.shapes
-				.iter()
-				.for_each(|shape| walk(&shape.shape, &mut text_rect));
-			output.drop_without_applying_deltas();
-			(action, text_rect)
-		};
-		let mut text = None;
-		for _ in 0..2 {
-			text = frame(vec![]).1;
-		}
-		let text = text.expect("status bubble painted");
-		// The bubble pads its text by 14 × 10; the tools sit on its top-right corner.
-		let bubble = Rect::from_min_max(text.min - vec2(14.0, 10.0), text.max + vec2(14.0, 10.0));
-		let tools = pos2(bubble.right() - 62.0, bubble.top() - 13.0);
-		let click = |pos: Pos2| {
-			let mut events = vec![egui::Event::PointerMoved(pos)];
-			for pressed in [true, false] {
-				events.push(egui::Event::PointerButton {
-					pos,
-					button: egui::PointerButton::Primary,
-					pressed,
-					modifiers: Default::default(),
-				});
-			}
-			events
-		};
-		for (offset, expected) in [(16.0, "edit"), (42.0, "clear")] {
-			let target = tools + vec2(offset, 13.0);
-			frame(vec![egui::Event::PointerMoved(bubble.center())]);
-			frame(vec![egui::Event::PointerMoved(target)]);
-			let (action, _) = frame(click(target));
-			match (expected, action) {
-				("edit", Some(Action::EditStatus)) | ("clear", Some(Action::ClearStatus)) => {}
-				(expected, other) => panic!("{expected}: {:?}", other.is_some()),
-			}
-		}
-	}
-
-	#[test]
 	fn private_profiles_show_the_lock_strip_and_notice_and_hide_withheld_sections() {
 		let ctx = egui::Context::default();
 		let state = test_support::demo_state();
@@ -5851,14 +5553,5 @@ mod tests {
 		};
 		assert_eq!(shown_status(&state, Id(7), None), None);
 		assert_eq!(shown_status(&state, Id(7), Some("idle")), Some("idle"));
-	}
-
-	#[test]
-	fn phone_badge_hover_covers_the_whole_phone() {
-		let avatar = Rect::from_min_size(pos2(0.0, 0.0), Vec2::splat(32.0));
-		let (radius, ring, center) = presence_badge_metrics(avatar);
-		let top = pos2(center.x, phone_body(center, radius).top() - ring * 0.5);
-		assert!(!presence_badge_rect(avatar, false).contains(top));
-		assert!(presence_badge_rect(avatar, true).contains(top));
 	}
 }

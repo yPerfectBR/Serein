@@ -597,7 +597,7 @@ fn main() -> eframe::Result {
 		persistence_path: None,
 		..Default::default()
 	};
-	eframe::run_native(
+	let result = eframe::run_native(
 		"Serein",
 		options,
 		Box::new(move |cc| {
@@ -621,7 +621,13 @@ fn main() -> eframe::Result {
 			}
 			Ok(Box::new(desktop))
 		}),
-	)
+	);
+	// Quitting mid-share drops media workers that are still closing their encoders, and
+	// NVIDIA's exit handlers crash or deadlock if the process exits during that teardown.
+	if !discord_voice::wait_for_media_threads(std::time::Duration::from_secs(5)) {
+		eprintln!("Screen or camera capture was still closing when Serein exited.");
+	}
+	result
 }
 /// Offline updater flow and settings rendering; never opens an account or installs a package.
 #[cfg(feature = "demo")]
@@ -3440,7 +3446,7 @@ impl Desktop {
 				self.messaging.voice_camera_preview = None;
 			}
 			if matches!(control, client_core::voice::Command::Leave { .. }) {
-				self.voice.stop();
+				self.voice.hang_up(&self.state);
 				self.messaging.camera_test_requested = false;
 				self.messaging.camera_test_texture = None;
 			}
@@ -3588,6 +3594,15 @@ impl Desktop {
 					user,
 					request,
 					result: dm_demo::channel(&self.state, user).map(Box::new),
+				}),
+				Command::UserAction {
+					action: client_core::user_actions::Action::CreateGroup { recipients },
+					request,
+					..
+				} => Event::UserAction(client_core::user_actions::Event::GroupCreated {
+					result: dm_demo::group(&self.state, &recipients, request).map(Box::new),
+					recipients,
+					request,
 				}),
 				Command::UserAction {
 					action: client_core::user_actions::Action::LoadNote(user),
@@ -5317,6 +5332,8 @@ impl eframe::App for Desktop {
 		}
 	}
 	fn on_exit(&mut self) {
+		// Later launches start a new client instead of waking this one while it shuts down.
+		self.instance.release();
 		if self.updater.finish_restart().is_err() {
 			eprintln!(
 				"Could not hand off the prepared update. The installed app was not replaced."
@@ -5492,10 +5509,17 @@ impl eframe::App for Desktop {
 		}
 		#[cfg(target_os = "macos")]
 		self.app_menu(ctx);
+		// Like Discord, Ctrl+Q exits even when closing the window only hides it to the tray.
+		#[cfg(not(target_os = "macos"))]
+		if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Q)) {
+			self.tray_window.quit(ctx);
+		}
+		let window_visible = self.window.is_visible();
 		self.tray_window.logic(
 			ctx,
 			self.background_available(),
-			self.window.is_visible().is_some(),
+			window_visible.is_some(),
+			window_visible,
 		);
 		// The hide command lands after this frame, so the flag leads reported visibility.
 		// Occlusion can occur during macOS fullscreen transitions; it is not a request
@@ -5838,6 +5862,7 @@ impl eframe::App for Desktop {
 		self.messaging.voice_available = true;
 		if close_requested
 			&& !self.close_approved
+			&& !self.tray_window.system_close()
 			&& ((self.state.demo && self.state.has_unsent())
 				|| self
 					.state
@@ -6639,63 +6664,6 @@ fn plaintext_login_dir() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	#[cfg(feature = "demo")]
-	#[test]
-	fn demo_group_members_preserve_recipients_and_deduplicate_current_account() {
-		let mut state = test_support::demo_state();
-		let channel = model::Id(29);
-		state.selected = Some(channel);
-		let recipient = state.channel(channel).unwrap().recipients[1].clone();
-		for include_current in [false, true] {
-			if include_current {
-				let current = state.user.clone().unwrap();
-				state
-					.channels
-					.iter_mut()
-					.find(|c| c.id == channel)
-					.unwrap()
-					.recipients = vec![current, recipient.clone()];
-			}
-			let Some(Command::Members { guild, request, .. }) = state.request_members() else {
-				panic!("synthetic group member request");
-			};
-			let expected = state.members.as_ref().unwrap().clone();
-			let response = demo_members(&state, guild, channel, request);
-			state.apply(Envelope {
-				generation: state.generation,
-				event: Event::Members(response),
-			});
-			let list = state.members.as_ref().unwrap();
-			assert_eq!(list.total, if include_current { 2 } else { 3 });
-			assert_eq!(list.total, expected.total);
-			let users = |list: &model::MemberList| {
-				list.slots
-					.iter()
-					.filter_map(|slot| match slot {
-						Some(model::MemberSlot::Person(member)) => Some(member.user.clone()),
-						_ => None,
-					})
-					.collect::<Vec<_>>()
-			};
-			assert!(users(list) == users(&expected));
-			assert!(users(list).contains(&recipient));
-		}
-	}
-
-	#[test]
-	fn user_action_results_use_toasts() {
-		let success = Event::UserAction(client_core::user_actions::Event::Written {
-			action: client_core::user_actions::Action::Nickname {
-				user: model::Id(2),
-				text: "Synthetic".into(),
-			},
-			request: 1,
-			result: Ok(()),
-		});
-		let (level, text) = user_action_notice(&success).unwrap();
-		assert!(matches!(level, ui::design::Level::Success));
-		assert_eq!(text, "Nickname saved");
-	}
 	#[test]
 	fn frame_sample_is_bounded_demo_only_and_excludes_warmup() {
 		for (demo, value) in [

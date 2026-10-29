@@ -171,8 +171,12 @@ impl State {
 		true
 	}
 
+	/// Discord reports a friend's presence directly, including going offline.
+	fn friend_presence_user(&self, user: Id) -> bool {
+		self.friend_username(user).is_some() && self.user_blocked(user) == Some(false)
+	}
 	fn known_presence_user(&self, user: Id) -> bool {
-		if self.friend_username(user).is_some() && self.user_blocked(user) == Some(false) {
+		if self.friend_presence_user(user) {
 			return true;
 		}
 		self.channels.iter().any(|c| {
@@ -205,6 +209,14 @@ impl State {
 				<= MAX_DIRECT_PRESENCES
 	}
 	pub(crate) fn apply_direct_presence(&mut self, updates: &[Update]) {
+		self.apply_presence(updates, false);
+	}
+	/// Guild-scoped presence stands in only for DM recipients who are not friends; a friend's
+	/// direct presence stays authoritative.
+	pub(crate) fn apply_shared_guild_presence(&mut self, updates: &[Update]) {
+		self.apply_presence(updates, true);
+	}
+	fn apply_presence(&mut self, updates: &[Update], shared: bool) {
 		if !self.gateway_connected {
 			return;
 		}
@@ -226,7 +238,9 @@ impl State {
 				|(_, bytes)| bytes,
 			);
 		for update in updates {
-			if !self.known_presence_user(update.user) {
+			if !self.known_presence_user(update.user)
+				|| (shared && self.friend_presence_user(update.user))
+			{
 				continue;
 			}
 			let index = self
@@ -237,6 +251,9 @@ impl State {
 			if !resolved.valid() || resolved.heap_bytes() > MAX_DIRECT_PRESENCE_BYTES {
 				self.direct_presence_lossy = true;
 				continue;
+			}
+			if !shared {
+				self.shared_presence_users.remove(&update.user);
 			}
 			if index.is_some_and(|i| self.direct_presences[i] == resolved) {
 				continue;
@@ -255,11 +272,15 @@ impl State {
 						> MAX_DIRECT_PRESENCE_BYTES)
 			{
 				let evicted = self.direct_presences.remove(0);
+				self.shared_presence_users.remove(&evicted.user);
 				self.direct_presence_lossy = true;
 				membership_changed |= online(&evicted);
 				retained_bytes -= evicted.heap_bytes();
 			}
 			retained_bytes += resolved.heap_bytes();
+			if shared {
+				self.shared_presence_users.insert(resolved.user);
+			}
 			self.direct_presences.push(resolved);
 		}
 		if membership_changed {
@@ -321,11 +342,17 @@ impl State {
 		self.direct_presences = old
 			.into_iter()
 			.filter(|p| {
-				let retained = self.known_presence_user(p.user);
+				// Once a friend, a shared-guild stand-in would outlive the direct feed's Offline.
+				let retained = self.known_presence_user(p.user)
+					&& !(self.shared_presence_users.contains(&p.user)
+						&& self.friend_presence_user(p.user));
 				membership_changed |= !retained && online(p);
 				retained
 			})
 			.collect();
+		let retained = &self.direct_presences;
+		self.shared_presence_users
+			.retain(|user| retained.iter().any(|p| p.user == *user));
 		if membership_changed {
 			self.direct_presence_epoch = self.direct_presence_epoch.wrapping_add(1);
 		}
@@ -335,6 +362,7 @@ impl State {
 			self.direct_presence_epoch = self.direct_presence_epoch.wrapping_add(1);
 		}
 		self.direct_presences.clear();
+		self.shared_presence_users.clear();
 		self.direct_presence_bytes = None;
 	}
 	pub(crate) fn apply_member_presence(
@@ -1042,6 +1070,22 @@ mod tests {
 		assert!(state.presence_for(friend.id).is_none());
 	}
 
+	fn befriend(state: &mut State, user: &model::User) {
+		state.apply(crate::Envelope {
+			generation: state.generation,
+			event: crate::Event::UserAction(crate::user_actions::Event::Friends(Some(vec![(
+				user.clone(),
+				"friend".into(),
+			)]))),
+		});
+		state.apply(crate::Envelope {
+			generation: state.generation,
+			event: crate::Event::UserAction(crate::user_actions::Event::Relationship {
+				user: user.id,
+				blocked: false,
+			}),
+		});
+	}
 	#[test]
 	fn absent_direct_presence_is_offline_only_while_the_store_is_complete() {
 		let mut state = direct_state();
@@ -1084,6 +1128,53 @@ mod tests {
 		state.gateway_connected = false;
 		state.channels[0].recipients.truncate(1);
 		assert!(!state.absent_presence_offline(recipient.id));
+	}
+	#[test]
+	fn shared_guild_presence_stands_in_only_for_dm_recipients_who_are_not_friends() {
+		let mut state = direct_state();
+		state.gateway_connected = true;
+		let recipient = state.channels[0].recipients[0].clone();
+		let idle = |status: &str| {
+			Event::SharedGuildPresence(vec![direct_update(
+				recipient.id.0,
+				Patch::Value(status.into()),
+				Patch::Absent,
+			)])
+		};
+		apply(&mut state, idle("idle"));
+		assert_eq!(
+			state.presence_for(recipient.id).unwrap().status.as_deref(),
+			Some("idle")
+		);
+		// Strangers sharing only a guild are not retained.
+		apply(
+			&mut state,
+			Event::SharedGuildPresence(vec![direct_update(
+				424_242,
+				Patch::Value("online".into()),
+				Patch::Absent,
+			)]),
+		);
+		assert!(state.presence_for(Id(424_242)).is_none());
+		// Once a friend, only the direct feed may change their presence; the shared stand-in
+		// goes so a missing direct report reads as Offline.
+		befriend(&mut state, &recipient);
+		state.gateway_connected = true;
+		assert!(state.presence_for(recipient.id).is_none());
+		assert!(state.shared_presence_users.is_empty());
+		apply(
+			&mut state,
+			Event::DirectPresence(vec![direct_update(
+				recipient.id.0,
+				Patch::Value("dnd".into()),
+				Patch::Absent,
+			)]),
+		);
+		apply(&mut state, idle("online"));
+		assert_eq!(
+			state.presence_for(recipient.id).unwrap().status.as_deref(),
+			Some("dnd")
+		);
 	}
 	fn direct_update(
 		user: u64,

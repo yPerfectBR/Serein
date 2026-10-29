@@ -762,19 +762,6 @@ mod tests {
 	}
 
 	#[test]
-	fn page_down_and_navigation_keys_are_supported() {
-		assert_eq!(key_name(Key::PageDown), Some("PageDown"));
-		assert_eq!(key_name(Key::PageUp), Some("PageUp"));
-		assert_eq!(key_name(Key::Insert), Some("Insert"));
-		assert_eq!(display_key("PageDown"), "PgDn");
-		assert_eq!(display_key("PageUp"), "PgUp");
-		assert_eq!(display_key("Insert"), "Ins");
-		assert_eq!(key_name_to_egui("PageDown"), Some(Key::PageDown));
-		assert_eq!(key_name(Key::F13), Some("F13"));
-		assert_eq!(key_name_to_egui("F24"), Some(Key::F24));
-	}
-
-	#[test]
 	fn conflicting_keybind_leaves_binding_unchanged() {
 		let mut bindings = Keybinds::default();
 		let mut capturing = Some(KeybindAction::ToggleDeafen);

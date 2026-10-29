@@ -338,6 +338,27 @@ const RETIRED_LISTS: usize = 8;
 /// Server, computed list identity, and the service identity when it differed.
 type RetiredList = (Id, String, Option<String>);
 
+/// Servers this session sent channel ranges for. Past the bound every server is assumed to
+/// hold some, which costs one extra frame per visit instead of a stuck list.
+#[derive(Default)]
+struct RangedGuilds {
+	guilds: std::collections::BTreeSet<Id>,
+	full: bool,
+}
+impl RangedGuilds {
+	const MAX: usize = 512;
+	fn may_hold(&self, guild: Id) -> bool {
+		self.full || self.guilds.contains(&guild)
+	}
+	fn insert(&mut self, guild: Id) {
+		if self.guilds.len() < Self::MAX {
+			self.guilds.insert(guild);
+		} else if !self.guilds.contains(&guild) {
+			self.full = true;
+		}
+	}
+}
+
 fn validate_member_ranges(ranges: &[[usize; 2]]) -> bool {
 	if !(1..=2).contains(&ranges.len()) {
 		return false;
@@ -361,6 +382,13 @@ fn subscription_span(ranges: &[[usize; 2]]) -> (usize, usize) {
 	(start, end - start + 1)
 }
 
+/// One aligned window just past `ranges`. Asking for it replaces the channel's ranges without an
+/// empty range list, which Discord rejects with close code 4002.
+fn elsewhere(ranges: &[[usize; 2]]) -> [[usize; 2]; 1] {
+	let start = (ranges[ranges.len() - 1][1] / 100 + 1) * 100;
+	[[start, start + 99]]
+}
+
 fn subscription_packet(
 	guild: Id,
 	typing: bool,
@@ -375,6 +403,9 @@ fn subscription_packet(
 	};
 	// Channel ranges are ignored until a prior frame has subscribed the guild.
 	// `typing` is that subscription. It does not send a typing notification.
+	// A non-empty `channels` replaces the guild's ranges; an empty one leaves them in place
+	// (unofficial, from owner traces). Asking again for ranges Discord still holds is no
+	// change, so it sends no new SYNC.
 	let threads: Vec<_> = channel
 		.filter(|_| thread)
 		.map(|(id, _)| id.to_string())
@@ -1177,6 +1208,8 @@ async fn run_recoverable(
 	let mut calls = voice::Calls::default();
 	// Survives RESUME: the service keeps delivering to lists subscribed before the drop.
 	let mut retired_lists: Vec<RetiredList> = Vec::new();
+	// Servers whose channel ranges this session may still hold; also survives RESUME.
+	let mut ranged = RangedGuilds::default();
 	let mut inbox = channel_events::Inbox::default();
 	let mut known_guilds = std::collections::BTreeSet::new();
 	let mut voice_open = true;
@@ -1307,6 +1340,7 @@ async fn run_recoverable(
 		let mut probe_deadline: Option<Instant> = None;
 		let mut active_members: Option<ActiveMembers> = None;
 		let mut direct_presence = presence::Pending::default();
+		let mut shared_presence = presence::Pending::shared();
 		let mut sent_members = false;
 		let mut members_deadline: Option<Instant> = None;
 		let mut subscriptions_open = true;
@@ -1349,6 +1383,28 @@ async fn run_recoverable(
 							break;
 						}
 					}
+					// Discord may still hold these ranges from an earlier visit, and would then
+					// send no SYNC for a list this client no longer has. Move them away first.
+					if !subscription.thread
+						&& active_members.is_none()
+						&& ranged.may_hold(subscription.guild)
+					{
+						member_diagnostics
+							.record("subscription: moved held ranges before requesting");
+						let away = elsewhere(&subscription.ranges);
+						let away = subscription_packet(
+							subscription.guild,
+							true,
+							Some((subscription.channel, &away)),
+							false,
+						);
+						if !matches!(
+							timeout(Duration::from_secs(5), socket.send(away)).await,
+							Ok(Ok(()))
+						) {
+							break;
+						}
+					}
 					if !matches!(
 						timeout(Duration::from_secs(5), socket.send(ranges)).await,
 						Ok(Ok(()))
@@ -1356,6 +1412,9 @@ async fn run_recoverable(
 						break;
 					}
 					member_diagnostics.record("subscription sent: member ranges");
+					if !subscription.thread {
+						ranged.insert(subscription.guild);
+					}
 					if let Some(active) = &mut active_members {
 						// Channels with the same list identity share the existing SYNC.
 						// A new viewport still has to move the stored span, or the next
@@ -1446,8 +1505,9 @@ async fn run_recoverable(
 					if let Some(packet) = outgoing_activity.packet(Instant::now())
 						&& !matches!(timeout(Duration::from_secs(5), socket.send(packet)).await, Ok(Ok(()))) { break; }
 				}
-				_=tokio::time::sleep_until(direct_presence.deadline.unwrap_or(ready_deadline)), if direct_presence.deadline.is_some() && ready_at.is_some() => {
+				_=tokio::time::sleep_until(direct_presence.deadline.into_iter().chain(shared_presence.deadline).min().unwrap_or(ready_deadline)), if (direct_presence.deadline.is_some() || shared_presence.deadline.is_some()) && ready_at.is_some() => {
 					if let Some(event)=direct_presence.take() { emit(event)?; }
+					if let Some(event)=shared_presence.take() { emit(event)?; }
 				}
 				command=voice_controls.recv(), if voice_open && ready_at.is_some() => {
 					let Some(command)=command else {voice_open=false;continue;};
@@ -1551,8 +1611,12 @@ async fn run_recoverable(
 				}
 				_=tokio::time::sleep_until(members_deadline.unwrap_or(ready_deadline)), if members_deadline.is_some() => {
 					member_diagnostics.record("timeout: resetting stalled member subscription");
-					if let Some(active) = &active_members
-						&& !matches!(timeout(Duration::from_secs(5), socket.send(subscription_packet(active.subscription.guild, true, None, active.subscription.thread))).await, Ok(Ok(()))) { break; }
+					// Moving the ranges away makes the request that follows a change Discord answers.
+					if let Some(active) = &active_members {
+						let away = if active.subscription.thread { None } else { Some(elsewhere(&active.subscription.ranges)) };
+						let packet = subscription_packet(active.subscription.guild, true, away.as_ref().map(|away| (active.subscription.channel, away.as_slice())), active.subscription.thread);
+						if !matches!(timeout(Duration::from_secs(5), socket.send(packet)).await, Ok(Ok(()))) { break; }
+					}
 					let delay = active_members.as_mut().map_or(Duration::from_secs(15), |active| {
 						active.awaiting_sync = true;
 						active.retries = active.retries.saturating_add(1);
@@ -1614,11 +1678,15 @@ async fn run_recoverable(
 								0 => match packet.t.as_deref().unwrap_or("") {
 									"READY" => {
 										direct_presence=presence::Pending::default();
+										shared_presence=presence::Pending::shared();
 										active_members=None;members_deadline=None;sent_members = !subscriptions_open;
+										// A new session holds no channel ranges.
+										ranged = RangedGuilds::default();
 										let envelope = ready::decode(packet.d.get().as_bytes()).map_err(|_| diagnosed(&emit, Failure::ProtocolAt("Gateway login: invalid READY identity or relationships"), ready::diagnose(packet.d.get().as_bytes())))?;
 										if envelope.user.bot { return Err(Failure::InvalidCredential); }
 										let permissions = envelope.permissions().map_err(|_| diagnosed(&emit, Failure::ProtocolAt("Gateway login: invalid permission metadata"), ready::diagnose(packet.d.get().as_bytes())))?;
 										let gates = envelope.onboarding();
+										let guild_presences = envelope.guild_presences();
 										let (mut ready, mut warnings) = envelope.navigation().map_err(|_| diagnosed(&emit, Failure::ProtocolAt("Gateway login: invalid READY guild or channel metadata"), ready::diagnose(packet.d.get().as_bytes())))?;
 										owner_id=Some(ready.user.id);
 										if ready.user.username.is_empty() || ready.user.username.len() > 128 || ready.user.username.chars().any(char::is_control) || ready.session_id.is_empty() || ready.session_id.chars().any(char::is_control) {
@@ -1663,6 +1731,10 @@ async fn run_recoverable(
 										let (read_entries,read_version,partial)=ready.read_state.take().map_or((None,None,false),|snapshot|(Some(snapshot.entries.into_iter().filter(|e|e.kind==0).map(|e|(e.id,e.last_message_id,e.mention_count)).collect()),snapshot.version,snapshot.partial));
 										if guilds.len() + channels.len() > MAX_NAV { return Err(Failure::CapacityAt("Account navigation exceeds 131,072 entries; connection stopped")); }
 										direct_presence.bootstrap_users=friends.as_ref().into_iter().flatten().map(|(u,_)|u.id).chain(channels.iter().filter(|c|c.guild.is_none() && matches!(c.kind,1|3)).flat_map(|c|c.recipients.iter().map(|u|u.id))).take(client_core::presence::MAX_DIRECT_PRESENCES).collect();
+										// DM recipients who are not friends are reported only through shared guilds.
+										shared_presence.bootstrap_users=channels.iter().filter(|c|c.guild.is_none() && matches!(c.kind,1|3)).flat_map(|c|c.recipients.iter().map(|u|u.id)).filter(|id|!friends.as_ref().into_iter().flatten().any(|(u,_)|u.id==*id)).take(client_core::presence::MAX_DIRECT_PRESENCES).collect();
+										for (user,_) in friends.iter().flatten() { shared_presence.set_friend(user.id,true); }
+										for user in channels.iter().filter(|c|c.guild.is_none() && matches!(c.kind,1|3)).flat_map(|c|&c.recipients) { shared_presence.add_recipient(user.id); }
 										calls.allowed=channels.iter().filter(|c|(c.guild.is_none() && channel_events::private_call(c.kind,c.recipients.len())) || (c.guild.is_some() && c.kind==2)).map(|c|(c.id,c.guild)).collect();
 										if was_ready { emit(Event::Resync)?; }
 										emit(Event::Interaction(client_core::interactions::Event::Session(state.session.clone().ok_or(Failure::Protocol)?)))?;
@@ -1675,6 +1747,7 @@ async fn run_recoverable(
 											user: ready.user.into_model(), guilds, channels, permissions,
 											read_state: client_core::read_state::Event::Snapshot {entries:read_entries,version:read_version,partial},
 											notifications, session_dnd: ready.sessions.as_ref().and_then(|s| s.dnd()), warnings,
+											threads: std::mem::take(&mut ready.thread_changes),
 										}.prepare()?)))?;
 										// A new session does not replay settings changed while disconnected.
 										if was_ready { emit(Event::AccountSettings { status: true, folders: true })?; }
@@ -1696,6 +1769,9 @@ async fn run_recoverable(
 										if let Some(friends) = ready.merged_presences.as_ref().and_then(|m| m.friends.as_deref()).or(ready.presences.as_deref()) {
 											direct_presence.friends(friends, Instant::now(), &emit)?;
 										}
+										// After Startup, like the direct bootstrap: a full batch flushed earlier would be dropped.
+										for presences in guild_presences { shared_presence.friends(presences, Instant::now(), &emit)?; }
+										if let Some(guilds) = ready.merged_presences.as_ref().and_then(|m| m.guilds.as_deref()) { shared_presence.guilds(guilds, Instant::now(), &emit)?; }
 										if !participants.is_empty() { emit(Event::Voice(client_core::voice::Event::Snapshot { partial: false, guild: None, participants }))?; }
 										state.failures = 0;
 										ready_at = Some(Instant::now());
@@ -1709,7 +1785,11 @@ async fn run_recoverable(
 										if let Some(friends) = extra.merged_presences.as_ref().and_then(|m| m.friends.as_deref()).or(extra.presences.as_deref()) {
 											direct_presence.friends(friends, Instant::now(), &emit)?;
 										}
+										if let Some(guilds) = extra.merged_presences.as_ref().and_then(|m| m.guilds.as_deref()) {
+											shared_presence.guilds(guilds, Instant::now(), &emit)?;
+										}
 										direct_presence.bootstrap_users.clear();
+										shared_presence.bootstrap_users.clear();
 										if let Some(owner)=owner_id {
 											let updates=permissions::supplemental(packet.d.get().as_bytes(),owner).map_err(|_|Failure::Protocol)?;
 											if !updates.is_empty() {emit(Event::Permissions(client_core::permissions::Event::Members(updates)))?;}
@@ -1731,7 +1811,7 @@ async fn run_recoverable(
 										calls.users.clear();
 									}
 									"RESUMED" => { emit(Event::Interaction(client_core::interactions::Event::Session(state.session.clone().ok_or(Failure::Protocol)?)))?; emit(Event::Resumed)?; state.failures = 0; ready_at = Some(Instant::now()); },
-									"CALL_CREATE" | "CALL_UPDATE" | "CALL_DELETE" | "CHANNEL_INFO" | "VOICE_CHANNEL_START_TIME_UPDATE" | "VOICE_STATE_UPDATE" | "VOICE_SERVER_UPDATE" | "STREAM_CREATE" | "STREAM_SERVER_UPDATE" | "STREAM_DELETE" => calls.dispatch(packet.t.as_deref().unwrap_or(""),packet.d.get().as_bytes(),owner_id,&emit)?,
+									"CALL_CREATE" | "CALL_UPDATE" | "CALL_DELETE" | "CHANNEL_INFO" | "VOICE_CHANNEL_START_TIME_UPDATE" | "VOICE_STATE_UPDATE" | "VOICE_SERVER_UPDATE" | "STREAM_CREATE" | "STREAM_SERVER_UPDATE" | "STREAM_UPDATE" | "STREAM_DELETE" => calls.dispatch(packet.t.as_deref().unwrap_or(""),packet.d.get().as_bytes(),owner_id,&emit)?,
 									"THREAD_MEMBER_LIST_UPDATE" => {
 										if let Some(active) = &mut active_members {
 											match active.thread_update(packet.d.get().as_bytes()) {
@@ -1777,7 +1857,10 @@ async fn run_recoverable(
 									"PRESENCE_UPDATE" => {
 										if let Ok(update)=discord_protocol::presence::decode(packet.d.get().as_bytes()) {
 											if update.guild.is_none() { direct_presence.push(update,Instant::now()); }
-											else if let Some(active)=&mut active_members && active.synced { active.presence(update,Instant::now()); }
+											else {
+												shared_presence.push(update.clone(),Instant::now());
+												if let Some(active)=&mut active_members && active.synced { active.presence(update,Instant::now()); }
+											}
 										}
 									}
 									"TYPING_START" => {
@@ -1786,7 +1869,7 @@ async fn run_recoverable(
 											emit(Event::Typing(client_core::typing::Signal { channel:typing.channel_id,user:typing.user_id,timestamp:typing.timestamp }))?;
 										}
 									}
-									"CHANNEL_RECIPIENT_ADD" => {let d:RecipientAdded=decode(packet.d.get().as_bytes()).map_err(|_|Failure::Protocol)?;emit(Event::RecipientAdded {channel:d.channel_id,user:d.user.into_model()})?;}
+									"CHANNEL_RECIPIENT_ADD" => {let d:RecipientAdded=decode(packet.d.get().as_bytes()).map_err(|_|Failure::Protocol)?;shared_presence.add_recipient(d.user.id);emit(Event::RecipientAdded {channel:d.channel_id,user:d.user.into_model()})?;}
 									"CHANNEL_RECIPIENT_REMOVE" => {let d:RecipientRemoved=decode(packet.d.get().as_bytes()).map_err(|_|Failure::Protocol)?;if owner_id==Some(d.user.id) {calls.allowed.remove(&d.channel_id);}emit(Event::RecipientRemoved {channel:d.channel_id,user:d.user.id})?;}
 									"USER_NOTE_UPDATE" => {
 										#[derive(serde::Deserialize)]
@@ -1798,6 +1881,7 @@ async fn run_recoverable(
 										let relationship: discord_protocol::relationships::Relationship = decode(packet.d.get().as_bytes()).map_err(|_| Failure::ProtocolAt("Unsupported relationship update"))?;
 										emit(Event::UserAction(client_core::user_actions::Event::Relationship { user: relationship.id, blocked: packet.t.as_deref() != Some("RELATIONSHIP_REMOVE") && relationship.kind == 2 }))?;
 										let friend = packet.t.as_deref() != Some("RELATIONSHIP_REMOVE") && relationship.kind == 1;
+										shared_presence.set_friend(relationship.id, friend);
 										let profile = relationship.user.map(discord_protocol::relationships::friend).transpose().map_err(|_| Failure::ProtocolAt("Invalid friend metadata"))?;
 										let ignored = (packet.t.as_deref() != Some("RELATIONSHIP_REMOVE") && (relationship.kind == 2 || relationship.user_ignored)).then_some(relationship.user_ignored && relationship.kind != 2);
 										let incoming = (packet.t.as_deref() != Some("RELATIONSHIP_REMOVE") && matches!(relationship.kind,3|4)).then_some(relationship.kind==3);
@@ -1875,7 +1959,10 @@ async fn run_recoverable(
 										let permissions=owner_id.map(|owner|channel_events::permission_metadata(packet.d.get().as_bytes(),owner)).transpose()?.flatten();
 										let (event, request, spam)=channel_events::create(packet.d.get().as_bytes(),&mut inbox)?;
 										match &event {
-											Event::ChannelCreated(c) => channel_events::admit_call(c,&known_guilds,&mut calls),
+											Event::ChannelCreated(c) => {
+												channel_events::admit_call(c,&known_guilds,&mut calls);
+												if c.guild.is_none() && matches!(c.kind,1|3) { for user in &c.recipients { shared_presence.add_recipient(user.id); } }
+											}
 											Event::Unavailable(id) => calls.invalidate(*id),
 											_=>{}
 										}
@@ -1903,8 +1990,9 @@ async fn run_recoverable(
 										}
 										if let Some(permissions)=permissions {emit(permissions)?;}
 									}
-									"THREAD_CREATE" | "THREAD_UPDATE" | "THREAD_DELETE" | "THREAD_LIST_SYNC" | "THREAD_MEMBERS_UPDATE" => {
-										if let Some(event) = thread_events::decode_event(packet.t.as_deref().unwrap_or(""), packet.d.get().as_bytes(), owner_id)? { emit(event)?; }
+									"THREAD_CREATE" | "THREAD_UPDATE" | "THREAD_DELETE" | "THREAD_LIST_SYNC" | "THREAD_MEMBERS_UPDATE" | "THREAD_MEMBER_UPDATE" => {
+										let (event, info) = thread_events::decode_events(packet.t.as_deref().unwrap_or(""), packet.d.get().as_bytes(), owner_id)?;
+										for event in event.into_iter().chain(info) { emit(event)?; }
 									}
 									"GUILD_STICKERS_UPDATE" => {
 										let update: discord_protocol::stickers::GuildStickersUpdate = decode(packet.d.get().as_bytes()).map_err(|_| Failure::Protocol)?;
@@ -3753,6 +3841,230 @@ mod member_tests {
 	            let ((),result)=tokio::join!(server,client);assert_eq!(result,Err(Failure::Expired));
 	        }).await.unwrap();
 		}
+	}
+
+	/// Connects to a loopback Gateway and returns the socket after READY.
+	async fn synthetic_gateway(
+		listener: tokio::net::TcpListener,
+	) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+		let (stream, _) = listener.accept().await.unwrap();
+		let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+		socket
+			.send(Frame::Text(
+				json!({"op":10,"d":{"heartbeat_interval":120000}})
+					.to_string()
+					.into(),
+			))
+			.await
+			.unwrap();
+		assert!(matches!(socket.next().await, Some(Ok(Frame::Text(_)))));
+		socket.send(Frame::Text(json!({"op":0,"t":"READY","s":1,"d":{"user":{"id":"1","username":"Owner"},"session_id":"synthetic-members","resume_gateway_url":"wss://gateway.discord.gg/","guilds":[],"private_channels":[]}}).to_string().into())).await.unwrap();
+		socket
+	}
+
+	/// Owner report: a large server's list loaded once, but after visiting another server it
+	/// stayed on "Loading people…". The fake service models the unofficial large-server
+	/// behaviour seen in owner traces: a non-empty `channels` replaces the server's ranges, an
+	/// empty one changes nothing, an empty range list is a 4002 close, and SYNC is sent only for
+	/// ranges the server did not already hold.
+	#[tokio::test]
+	async fn returning_to_a_large_server_loads_its_list_again() {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let endpoint = format!("ws://{}/", listener.local_addr().unwrap());
+		let open = |guild: u64, channel: u64, request: u64| MemberSubscription {
+			thread: false,
+			guild: Id(guild),
+			channel: Id(channel),
+			request,
+			list_id: "everyone".into(),
+			ranges: vec![[0, 99]],
+		};
+		let (selection, receive) = watch::channel(Some(open(1, 10, 1)));
+		let rejected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let server = tokio::spawn({
+			let rejected = rejected.clone();
+			async move {
+				let mut socket = synthetic_gateway(listener).await;
+				let mut typing = std::collections::BTreeSet::<String>::new();
+				let mut held = BTreeMap::<String, Vec<serde_json::Value>>::new();
+				let mut sequence = 2;
+				while let Some(Ok(Frame::Text(text))) = socket.next().await {
+					let packet: serde_json::Value = serde_json::from_str(&text).unwrap();
+					if packet["op"] == 1 {
+						let _ = socket
+							.send(Frame::Text(json!({"op":11,"d":null}).to_string().into()))
+							.await;
+						continue;
+					}
+					for (guild, subscription) in packet["d"]["subscriptions"].as_object().unwrap() {
+						let channels = subscription["channels"].as_object().unwrap();
+						if channels.values().any(|ranges| ranges == &json!([])) {
+							rejected.store(true, std::sync::atomic::Ordering::Relaxed);
+							let _ = socket.close(None).await;
+							return;
+						}
+						let was_subscribed = typing.contains(guild);
+						if subscription["typing"] == true {
+							typing.insert(guild.clone());
+						} else {
+							typing.remove(guild);
+						}
+						if !was_subscribed || channels.is_empty() {
+							continue;
+						}
+						let ranges: Vec<_> = channels
+							.values()
+							.flat_map(|ranges| ranges.as_array().unwrap().clone())
+							.collect();
+						let before = held
+							.insert(guild.clone(), ranges.clone())
+							.unwrap_or_default();
+						for range in ranges.iter().filter(|range| !before.contains(range)) {
+							let user = if range != &json!([0, 99]) {
+								"999"
+							} else if guild == "1" {
+								"100"
+							} else {
+								"200"
+							};
+							let _ = socket.send(Frame::Text(json!({"op":0,"t":"GUILD_MEMBER_LIST_UPDATE","s":sequence,"d":{"guild_id":guild,"id":"everyone","member_count":1,"ops":[{"op":"SYNC","range":range,"items":[{"member":{"user":{"id":user,"username":"Synthetic"}}}]}]}}).to_string().into())).await;
+							sequence += 1;
+						}
+					}
+				}
+			}
+		});
+		let (done, finished) = tokio::sync::oneshot::channel();
+		let done = std::cell::Cell::new(Some(done));
+		let client = run_inner(
+			Arc::new(SessionSecret::from_owner_input("synthetic-owner-session".into()).unwrap()),
+			"wss://gateway.discord.gg/".into(),
+			receive,
+			mpsc::channel(1).1,
+			None,
+			|event| {
+				if let Event::Members(list) = &event
+					&& list.freshness == Freshness::Fresh
+				{
+					// Another channel sharing the list, another server, then the first channel.
+					match list.request {
+						1 => selection.send(Some(open(1, 11, 2))).unwrap(),
+						2 => selection.send(Some(open(2, 20, 3))).unwrap(),
+						3 => selection.send(Some(open(1, 10, 4))).unwrap(),
+						4 => {
+							assert_eq!(person_snap(list, 0).user.id, Id(100));
+							if let Some(done) = done.take() {
+								let _ = done.send(());
+							}
+						}
+						_ => {}
+					}
+				}
+				Ok(())
+			},
+			Some(&endpoint),
+		);
+		let loaded = tokio::select! {
+			result = client => Err(format!("gateway stopped: {result:?}")),
+			loaded = timeout(Duration::from_secs(5), finished) => loaded.map_err(|_| "the return visit stayed loading".to_owned()),
+		};
+		assert!(
+			!rejected.load(std::sync::atomic::Ordering::Relaxed),
+			"sent an empty range list, which Discord closes with 4002"
+		);
+		loaded.unwrap().unwrap();
+		server.abort();
+	}
+
+	/// A list Discord never answered is reset after 15 seconds. The reset must move the ranges
+	/// away before asking again; asking for ranges Discord still holds gets no SYNC.
+	#[tokio::test]
+	async fn stalled_list_reset_moves_ranges_and_loads() {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let endpoint = format!("ws://{}/", listener.local_addr().unwrap());
+		let (_selection, receive) = watch::channel(Some(MemberSubscription {
+			thread: false,
+			guild: Id(1),
+			channel: Id(2),
+			request: 1,
+			list_id: "everyone".into(),
+			ranges: vec![[0, 99]],
+		}));
+		let (first, requested_once) = tokio::sync::oneshot::channel();
+		let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+		let server = tokio::spawn({
+			let requests = requests.clone();
+			async move {
+				let mut socket = synthetic_gateway(listener).await;
+				let mut first = Some(first);
+				while let Some(Ok(Frame::Text(text))) = socket.next().await {
+					let packet: serde_json::Value = serde_json::from_str(&text).unwrap();
+					if packet["op"] == 1 {
+						let _ = socket
+							.send(Frame::Text(json!({"op":11,"d":null}).to_string().into()))
+							.await;
+						continue;
+					}
+					let channels = &packet["d"]["subscriptions"]["1"]["channels"];
+					if channels == &json!({}) {
+						continue;
+					}
+					// The first request is lost; only a request after the away window is answered.
+					let answer = {
+						let mut requested = requests.lock().unwrap();
+						requested.push(channels["2"].clone());
+						requested.len() >= 3
+							&& requested[requested.len() - 2] == json!([[100, 199]])
+					};
+					if let Some(first) = first.take() {
+						let _ = first.send(());
+					}
+					if answer {
+						let _ = socket.send(Frame::Text(json!({"op":0,"t":"GUILD_MEMBER_LIST_UPDATE","s":2,"d":{"guild_id":"1","id":"everyone","member_count":1,"ops":[{"op":"SYNC","range":[0,99],"items":[{"member":{"user":{"id":"100","username":"Synthetic"}}}]}]}}).to_string().into())).await;
+					}
+				}
+			}
+		});
+		let (done, finished) = tokio::sync::oneshot::channel();
+		let done = std::cell::Cell::new(Some(done));
+		let client = run_inner(
+			Arc::new(SessionSecret::from_owner_input("synthetic-owner-session".into()).unwrap()),
+			"wss://gateway.discord.gg/".into(),
+			receive,
+			mpsc::channel(1).1,
+			None,
+			|event| {
+				if let Event::Members(list) = &event
+					&& list.freshness == Freshness::Fresh
+					&& let Some(done) = done.take()
+				{
+					assert_eq!(person_snap(list, 0).user.id, Id(100));
+					let _ = done.send(());
+				}
+				Ok(())
+			},
+			Some(&endpoint),
+		);
+		// Real time until the first request is in; then one manual jump past the reset. A clock
+		// paused from the start lets the client run resets ahead of the socket.
+		let reset = async {
+			requested_once.await.unwrap();
+			tokio::time::pause();
+			tokio::time::advance(Duration::from_secs(16)).await;
+			tokio::time::resume();
+			timeout(Duration::from_secs(10), finished).await
+		};
+		let loaded = tokio::select! {
+			result = client => Err(format!("gateway stopped: {result:?}")),
+			loaded = reset => loaded.map_err(|_| "the reset never loaded the list".to_owned()),
+		};
+		server.abort();
+		loaded.unwrap().unwrap();
+		// The reset sends the away window, then the requested rows again.
+		assert_eq!(
+			requests.lock().unwrap()[..3],
+			[json!([[0, 99]]), json!([[100, 199]]), json!([[0, 99]])]
+		);
 	}
 }
 

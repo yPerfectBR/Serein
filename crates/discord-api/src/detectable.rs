@@ -282,62 +282,6 @@ mod tests {
 	use super::*;
 
 	#[test]
-	#[ignore = "release process matcher benchmark; one warmup and five measured batches"]
-	fn process_matcher_benchmark() {
-		const PROCESSES: usize = 4096;
-		const SCANS: usize = 100;
-		let games: Vec<Game> = (0..PROCESSES / 4)
-			.map(|game| Game {
-				id: Id(game as u64 + 1),
-				name: format!("Synthetic game {game}"),
-				executables: vec![
-					format!("game-{game}.exe"),
-					format!("steamapps/common/game-{game}/bin/play.exe"),
-					format!("synthetic {game}.app"),
-				],
-			})
-			.collect();
-		let index = Index::new(&games);
-		let paths: Vec<String> = (0..PROCESSES)
-			.map(|process| {
-				let game = process / 4;
-				match process % 4 {
-					0 => format!("/opt/synthetic/tools/{game}/unmatched.exe"),
-					1 => format!(r"C:\Games\Slot{game}\game-{game}.exe"),
-					2 => format!(r"C:\Steam\steamapps\common\game-{game}\bin\play.exe"),
-					_ => format!("/Applications/Synthetic {game}.app/Contents/MacOS/main"),
-				}
-			})
-			.collect();
-		let mut samples = [0.0; 5];
-		for batch in 0..=samples.len() {
-			let started = std::time::Instant::now();
-			let mut hits = 0;
-			for _ in 0..SCANS {
-				for path in &paths {
-					hits += usize::from(
-						std::hint::black_box(index.find(std::hint::black_box(path))).is_some(),
-					);
-				}
-			}
-			let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-			assert_eq!(hits, PROCESSES / 4 * 3 * SCANS);
-			if batch > 0 {
-				samples[batch - 1] = elapsed_ms;
-			}
-		}
-		eprintln!(
-			"Synthetic process matcher: {SCANS} scans of {PROCESSES} paths; batch ms {samples:?}"
-		);
-		samples.sort_by(f64::total_cmp);
-		eprintln!(
-			"Median {:.3} ms per batch, {:.3} ms per scan; matching only, excluding process enumeration.",
-			samples[2],
-			samples[2] / SCANS as f64,
-		);
-	}
-
-	#[test]
 	fn suffix_matching_preserves_component_limits_and_bundle_priority() {
 		let games: Vec<Game> = [
 			(1, "game.exe"),

@@ -890,7 +890,7 @@ pacing and teardown; native output selection, sound quality, echo and live inter
 remain unverified. Linux adds the native `libpulse-sys 1.23.0` bindings; no new Flatpak
 permission, virtual device, output rerouting or recording file is added.
 
-Gateway opcodes 18/19 and STREAM_CREATE/STREAM_SERVER_UPDATE/STREAM_DELETE are unofficial normal-user behavior, checked against [discord.py-self](https://github.com/dolfies/discord.py-self/blob/master/discord/gateway.py). A separate RTC connection uses the stream RTC server/channel IDs and the parent call session, sharing one ephemeral DAVE signing identity. The `rtc_server_id - 1` MLS group mapping comes from [discord-native-voice](https://github.com/dolfies/discord-native-voice/blob/master/discord/ext/native_voice/stream_client.py); it is not an official protocol guarantee. H264 negotiation and UDP transport are required; mismatches fail visibly. Video is DAVE-encrypted before RFC 6184 packetization and per-packet transport AEAD. There is no plaintext fallback. [DAVE protocol](https://github.com/discord/dave-protocol/blob/main/protocol.md) supplies the encryption requirement.
+Gateway opcodes 18/19 and STREAM_CREATE/STREAM_SERVER_UPDATE/STREAM_DELETE are unofficial normal-user behavior, checked against [discord.py-self](https://github.com/dolfies/discord.py-self/blob/master/discord/gateway.py). STREAM_UPDATE `viewer_ids` for the own stream is likewise unofficial (seen in Discord's web client bundle) and unverified against live service; only its length is kept, to play the viewer-join cue when the count rises from 25 or fewer, as Discord's client does. A separate RTC connection uses the stream RTC server/channel IDs and the parent call session, sharing one ephemeral DAVE signing identity. The `rtc_server_id - 1` MLS group mapping comes from [discord-native-voice](https://github.com/dolfies/discord-native-voice/blob/master/discord/ext/native_voice/stream_client.py); it is not an official protocol guarantee. H264 negotiation and UDP transport are required; mismatches fail visibly. Video is DAVE-encrypted before RFC 6184 packetization and per-packet transport AEAD. There is no plaintext fallback. [DAVE protocol](https://github.com/discord/dave-protocol/blob/main/protocol.md) supplies the encryption requirement.
 
 Screen source discovery and capture occur off the UI/audio threads. Application-owned source lists are capped at 64 labels of 256 bytes. Raw BGRA frames are capped at 3840×2160/33,177,600 bytes; macOS requests the selected output dimensions. Windows prechecks source size and stops on oversized callback frames, but its upstream driver adapter can resize its native GPU pool before that callback. One raw frame and three encoded frames can be queued; H264 frames are capped at 2 MiB, encrypted packetization at 2,048 fragments of at most 1,200 transport bytes. Quality presets target 4–16 Mbps, with frame dropping under load. They are limits/targets, not measured delivery guarantees.
 
@@ -1474,6 +1474,20 @@ and rich text alongside presence. Only received activity metadata is displayed; 
 unavailable. Offline status clears activity. Disconnect hides cached DM presence; a successful resume restores it and applies replayed changes. Fresh READY, resync and session reset discard the cache.
 Join/spectate actions and progress timers remain unsupported.
 
+DM recipients who are not friends (October 17, 2026): Discord subscribes a normal account
+to the presence of users it has an open DM with, but reports non-friends through guilds:
+READY `guilds[].presences`, READY_SUPPLEMENTAL `merged_presences.guilds` and guild-scoped
+PRESENCE_UPDATE. Serein previously read none of these for DMs, so such a recipient stayed
+Offline whatever their status. These guild sources now stand in for DM recipients who are
+not friends only, batched separately within the same 100-ms window and limits; friends keep
+using only the direct feed. The gateway drops guild updates for anyone else before batching,
+tracking DM recipients and friends (up to 4,096 each) as channels and relationships change, and
+sends the READY guild bootstrap after Startup. A shared status is discarded once that recipient
+becomes a friend. As before, a DM recipient without any report is Offline, matching
+the unofficial description that only non-offline users are sent. These shapes come from the
+[unofficial gateway documentation](https://docs.discord.food/topics/gateway-events) and were
+not validated against a live session.
+
 Startup correction: Identify does not enable `DEDUPE_USER_OBJECTS`, so initial friend presence
 arrives in `READY.presences` with `user.id`. The bootstrap now accepts that format as well as
 `merged_presences.friends` with `user_id`; both use the same recipient filter and byte/item limits.
@@ -1522,13 +1536,34 @@ for its MP3-labeled card; a separate original MP3 fixture checks real MP3 decodi
 Live CDN/account interoperability and native output on other OSes remain unverified.
 
 The streaming player no longer rejects encoded attachments above 20 MiB. It reads
-validated 16 KiB HTTP ranges into a one-second PCM queue instead of retaining the
-file. The shared original-attachment validator still admits at most 100 MiB.
+validated HTTP ranges into a one-second PCM queue instead of retaining the
+file. Since October 17, 2026, startup still fetches one 16 KiB range, but sequential
+ranges double up to 256 KiB and the next one is fetched in the background once reading
+passes half of the current one, so at most two ranges (512 KiB) are held. Output starts
+after a quarter second of decoded audio (or the end of a shorter clip), and after an
+underrun it resumes only once a fifth of a second is queued again. A synthetic local
+range server decodes a 4 MiB WAV in at most 24 requests, where 16 KiB reads needed 256.
+Seeking still replays decoding from the start, but each clip keeps up to 16 MiB of its
+downloaded ranges (from the start of the file) until it stops or another clip starts, so
+replaying a cached clip makes no further requests. The shared original-attachment validator still admits at most 100 MiB.
 The separate 64 MiB cumulative decoded-audio and ten-minute limits remain;
 servers without range support require external playback. The offline
 `--demo --demo-check-audio` debug command checks public admission and decodes an entire
 24 MiB WAV over synthetic local HTTP ranges, without retaining the decoded clip,
 opening an audio device or contacting Discord.
+
+M4A, AAC and FLAC (October 17, 2026): `.m4a`, `.aac` and `.flac` attachments, and the
+`audio/mp4`, `audio/x-m4a`, `audio/aac` and `audio/flac` MIME families, now use the inline audio
+player. An audio extension takes precedence over a `video/*` MIME type, which can be reported for
+MP4-family audio; Serein previously sent such files to the video player, which showed an empty
+stage. Symphonia's ISO MP4, AAC-LC, ALAC and FLAC readers decode them. The bounded source
+keeps its rule that demuxers never parse attachment metadata: FLAC forwards only STREAMINFO and
+skips tag, picture and padding blocks unread; MP4 validates the top-level layout, reads a movie
+index of at most 8 MiB and renames its `udta`/`meta` boxes and unknown top-level boxes to `free`
+in place. MP4 is the one seekable layout, because its index can follow the audio and sample
+offsets are absolute. HE-AAC and fragmented MP4 remain unsupported (Download/Open original).
+Synthetic 0.2-second fixtures cover AAC with a trailing index, ALAC and FLAC; live CDN delivery
+of these types is unverified.
 
 ### Unknown Gateway variants (September 10, 2026)
 
@@ -2567,3 +2602,34 @@ the official notice in place of the withheld details, and omits Member Since and
 matching the official client. Roles, mutuals and the message field stay. The service
 withholds the hidden data itself; Serein never infers privacy from missing fields. No live
 private-profile response has been used as validation.
+
+## Member list on a return visit — October 25, 2026
+
+On large servers Discord remembers which member-list rows a client asked for, even after the
+pane moves to another server. On a return visit Serein asked for the same rows again; Discord
+saw no change and never re-sent the list, so it stayed on "Loading people…". Serein now first
+asks for a different row window, then the real one, which Discord treats as new and answers.
+Clearing the rows with an empty list is not an option: Discord disconnects with code 4002.
+
+This behaviour is unofficial and inferred from owner traces; a loopback test models it, and
+the owner confirmed the fix in a debug build.
+
+## New message picker - October 27, 2026
+
+The DM list header carries the official client's "New Message" action: a picker that lists
+friends, searches them by display name or handle, and opens either one direct message or a
+group. One chosen person reuses the existing DM path (`GET` selection when the conversation
+is already loaded, otherwise `POST /users/@me/channels` with `recipient_id`). Two to nine
+people send one `POST /users/@me/channels` with `recipients`; the service adds this
+account as the owner, so ten people is the whole group.
+
+The group request and its answer are bounded like the rest of the account writes: no retry,
+one request at a time, and the response is admitted only when it is a group channel whose
+recipients cover everyone that was asked for. The created channel is opened the same way a
+newly opened DM is, and navigation made while the request was in flight wins over it.
+Failures report the service label instead of leaving the picker open.
+
+`POST /users/@me/channels` is a documented route, but sending `recipients` from a normal
+account is an unofficial request shape, inferred from the official client and live-unverified:
+loopback tests cover the request shape and response validation, and the owner's release-build
+pass exercised the picker but not live group creation.

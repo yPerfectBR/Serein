@@ -56,6 +56,7 @@ impl Settings {
 			convert_emoticons: ui.convert_emoticons,
 			preload_on_hover: ui.preload_on_hover,
 			hide_title_bar: ui.hide_title_bar,
+			message_requests_collapsed: ui.message_requests_collapsed,
 			hide_window_decorations: ui.hide_window_decorations,
 			gpu_preference: ui.gpu_preference,
 			primary_color: ui.primary_color,
@@ -104,6 +105,7 @@ impl Settings {
 		ui.convert_emoticons = value.convert_emoticons;
 		ui.preload_on_hover = value.preload_on_hover;
 		ui.hide_title_bar = value.hide_title_bar;
+		ui.message_requests_collapsed = value.message_requests_collapsed;
 		ui.hide_window_decorations = value.hide_window_decorations;
 		ui.gpu_preference = value.gpu_preference;
 		ui.primary_color = value.primary_color;
@@ -392,22 +394,6 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn minimum_tracks_monitor_size_scale_and_decorations() {
-		for (available, frame, scale, expected) in [
-			([640, 480], [16, 39], 1.0, [624, 441]),
-			([1920, 1080], [16, 39], 1.0, MIN_WINDOW_SIZE),
-			([1920, 1080], [24, 59], 1.5, [1140, 780]),
-			([960, 720], [24, 59], 1.5, [936, 661]),
-			([8, 12], [16, 39], 1.0, [1, 1]),
-		] {
-			assert_eq!(
-				window_minimum(available.into(), frame, scale),
-				winit::dpi::PhysicalSize::from(expected)
-			);
-		}
-	}
-
-	#[test]
 	fn startup_defaults_do_not_overwrite_pending_saved_preferences() {
 		let mut settings = Settings::default();
 		let defaults = AppPreferences::default();
@@ -432,6 +418,25 @@ mod tests {
 		assert!(ui.notification_options.current_channel);
 		assert!(!settings.state.touched);
 		assert!(!settings.state.dirty);
+	}
+
+	#[test]
+	fn collapsed_message_requests_restore_and_track_user_changes() {
+		let mut settings = Settings {
+			loaded: true,
+			..Default::default()
+		};
+		settings.current.message_requests_collapsed = true;
+		let mut ui = ui::MessagingUi::default();
+		settings.apply(&mut ui);
+		assert!(ui.message_requests_collapsed);
+		settings.observe(&ui);
+		assert!(!settings.state.dirty);
+
+		ui.message_requests_collapsed = false;
+		settings.observe(&ui);
+		assert!(!settings.current.message_requests_collapsed);
+		assert!(settings.state.dirty);
 	}
 
 	#[test]

@@ -320,6 +320,8 @@ pub struct Startup {
 	pub notifications: Option<notifications::Event>,
 	pub session_dnd: Option<bool>,
 	pub warnings: model::account::Warnings,
+	/// Membership and archive metadata of the joined threads among `channels`.
+	pub threads: Vec<model::threads::Change>,
 }
 impl Startup {
 	/// Validate and build the permission mirror on the Gateway worker before enqueueing.
@@ -361,6 +363,7 @@ impl Startup {
 			+ self.guilds.iter().map(Guild::bytes).sum::<usize>()
 			+ self.channels.iter().map(Channel::bytes).sum::<usize>()
 			+ self.read_state.bytes()
+			+ self.threads.capacity() * size_of::<model::threads::Change>()
 			+ self
 				.notifications
 				.as_ref()
@@ -584,6 +587,11 @@ pub enum Event {
 		threads: Vec<Channel>,
 		removed: Vec<Id>,
 	},
+	/// Membership or archive metadata of known threads.
+	ThreadInfo {
+		guild: Id,
+		changes: Vec<model::threads::Change>,
+	},
 	GuildChanged(GuildPatch),
 	GuildEmojis {
 		guild: Id,
@@ -591,6 +599,8 @@ pub enum Event {
 	},
 	Members(MemberList),
 	DirectPresence(Vec<presence::Update>),
+	/// Guild-scoped presence for DM recipients who are not friends.
+	SharedGuildPresence(Vec<presence::Update>),
 	MemberPresence {
 		guild: Id,
 		channel: Id,
@@ -738,6 +748,8 @@ pub struct State {
 	pub archives: Option<archives::View>,
 	pub posting: forum::Posting,
 	pub posts: forum::Posts,
+	/// The forum on screen, for its once-per-visit acknowledgement and card boundary.
+	pub forum_visit: Option<forum::Visit>,
 	pub archived_thread: Option<Id>,
 	pub thread_starter: thread_starter::Starter,
 	pub search: Option<search::SearchView>,
@@ -789,6 +801,9 @@ pub struct State {
 	/// A direct presence was dropped or evicted, or READY's presence was unavailable.
 	#[doc(hidden)]
 	pub direct_presence_lossy: bool,
+	/// Users whose `direct_presences` record came from shared-guild presence, not the direct feed.
+	#[doc(hidden)]
+	pub shared_presence_users: BTreeSet<Id>,
 	pub member_request: u64,
 	pub guilds: Vec<Guild>,
 	pub channels: Vec<Channel>,
@@ -801,9 +816,9 @@ pub struct State {
 	/// Session-local guild/channel ID pairs, oldest visit first; at most 16 KiB.
 	#[doc(hidden)]
 	pub last_viewed_channels: Vec<(Id, Id)>,
-	/// Session-local opened threads, newest first; at most 1,024 IDs / 8 KiB.
+	/// Membership and archive metadata of known threads; one entry per thread channel.
 	#[doc(hidden)]
-	pub last_viewed_threads: Vec<Id>,
+	pub thread_info: BTreeMap<Id, model::threads::Info>,
 	pub timeline: Timeline,
 	pub preserve_deleted_messages: bool,
 	pub resident: resident::Windows,
@@ -974,6 +989,7 @@ impl Default for State {
 			archives: None,
 			posting: forum::Posting::default(),
 			posts: forum::Posts::default(),
+			forum_visit: None,
 			archived_thread: None,
 			thread_starter: Default::default(),
 			search: None,
@@ -1015,6 +1031,7 @@ impl Default for State {
 			direct_presence_bytes: None,
 			direct_presence_epoch: 0,
 			direct_presence_lossy: false,
+			shared_presence_users: BTreeSet::new(),
 			member_request: 0,
 			guilds: vec![],
 			channels: vec![],
@@ -1022,7 +1039,7 @@ impl Default for State {
 			selected: None,
 			last_viewed_dm: None,
 			last_viewed_channels: Vec::new(),
-			last_viewed_threads: Vec::new(),
+			thread_info: BTreeMap::new(),
 			timeline: Timeline::default(),
 			preserve_deleted_messages: false,
 			resident: resident::Windows::default(),
@@ -1320,14 +1337,6 @@ impl State {
 		}
 		let parked_reply = self.swap_parked_reply(channel);
 		self.remember_channel(channel);
-		if self
-			.channel(channel)
-			.is_some_and(|c| matches!(c.kind, 10..=12))
-		{
-			self.last_viewed_threads.retain(|id| *id != channel);
-			self.last_viewed_threads.truncate(1023);
-			self.last_viewed_threads.insert(0, channel);
-		}
 		self.retire_archived_thread(Some(channel));
 		self.typing.clear();
 		let trusted = self.select_resident(channel);
@@ -2535,9 +2544,11 @@ impl State {
 		self.status = "Work queue full; action was not sent";
 		self.freshness = Freshness::Stale;
 	}
+	/// Apply an incoming event envelope to update local state and reconciliation caches.
 	pub fn apply(&mut self, envelope: Envelope) {
 		self.apply_with_permissions(envelope, None);
 	}
+	/// Apply an event envelope with optional precalculated permission caches.
 	fn apply_with_permissions(
 		&mut self,
 		envelope: Envelope,
@@ -2572,6 +2583,7 @@ impl State {
 				notifications,
 				session_dnd,
 				mut warnings,
+				threads,
 			} = data;
 			self.apply_with_permissions(
 				Envelope {
@@ -2589,6 +2601,8 @@ impl State {
 				return;
 			}
 			self.set_premium_type(premium_type);
+			self.thread_info.clear();
+			self.apply_thread_changes(None, threads);
 			warnings.read_state |= self.apply_read_state(read_state).is_err();
 			if let Some(settings) = notifications {
 				warnings.notifications |= self.apply_notification_preferences(settings).is_err();
@@ -2650,6 +2664,13 @@ impl State {
 				self.apply_direct_presence(updates);
 			} else {
 				self.direct_presence_lossy = true;
+			}
+			return;
+		}
+		if let Event::SharedGuildPresence(updates) = &envelope.event {
+			// Only a fallback: an oversized batch is dropped without marking friends lossy.
+			if envelope.event.bytes() <= MAX_MEMBER_PRESENCE_BYTES {
+				self.apply_shared_guild_presence(updates);
 			}
 			return;
 		}
@@ -2951,7 +2972,20 @@ impl State {
 				self.apply_messaging_permissions(request, result);
 				Ok(())
 			}
-			Event::UserAction(event) => self.apply_user_action(event),
+			Event::UserAction(event) => {
+				let friendship = matches!(
+					&event,
+					user_actions::Event::Friends(_)
+						| user_actions::Event::Friend { .. }
+						| user_actions::Event::Relationship { .. }
+				);
+				let result = self.apply_user_action(event);
+				// A new friend's direct presence is authoritative; drop any shared-guild stand-in.
+				if friendship && !self.shared_presence_users.is_empty() {
+					self.prune_direct_presence();
+				}
+				result
+			}
 			Event::ServerAction(event) => self.apply_server_action(event),
 			Event::ChannelAction(event) => self.apply_channel_action(event),
 			Event::ServerSettings(event) => self.apply_server_settings(event),
@@ -2964,6 +2998,10 @@ impl State {
 				threads,
 				removed,
 			} => self.apply_threads_sync(guild, parents, threads, removed),
+			Event::ThreadInfo { guild, changes } => {
+				self.apply_thread_changes(Some(guild), changes);
+				Ok(())
+			}
 			Event::Interaction(event) => self.apply_interaction(event),
 			Event::ApplicationCommands {
 				channel,
@@ -3340,7 +3378,9 @@ impl State {
 				}
 				Ok(())
 			}
-			Event::MemberPresence { .. } | Event::DirectPresence(_) => {
+			Event::MemberPresence { .. }
+			| Event::DirectPresence(_)
+			| Event::SharedGuildPresence(_) => {
 				unreachable!("presence handled before timeline revision")
 			}
 			Event::MemberSearch { request, result } => {
@@ -3842,6 +3882,7 @@ impl State {
 							{
 								self.remember_sticker(sticker);
 							}
+							self.observe_notification(&m);
 							self.observe_last_message(m.channel, m.id);
 						}
 						let accepted_reference = correlated && self.accepts_reply_source(&m);
@@ -4117,7 +4158,7 @@ impl State {
 	}
 	fn remove_channels(&mut self, removed: &BTreeSet<Id>) {
 		self.invalidate_navigation();
-		self.last_viewed_threads.retain(|id| !removed.contains(id));
+		self.thread_info.retain(|id, _| !removed.contains(id));
 		for id in removed {
 			self.resident.remove(*id);
 		}
@@ -4352,6 +4393,12 @@ impl Event {
 				Self::UserAction(user_actions::Event::DmOpened { result, .. }) => {
 					result.as_ref().map_or(0, |channel| channel.bytes())
 				}
+				Self::UserAction(user_actions::Event::GroupCreated {
+					recipients, result, ..
+				}) => {
+					recipients.capacity() * size_of::<Id>()
+						+ result.as_ref().map_or(0, |channel| channel.bytes())
+				}
 				Self::UserAction(user_actions::Event::Requests(entries)) => {
 					entries.as_ref().map_or(0, |e| {
 						e.capacity() * size_of::<(User, String, bool)>()
@@ -4485,6 +4532,9 @@ impl Event {
 					})
 					.sum(),
 				Self::ChannelCreated(channel) | Self::ChannelRestored(channel) => channel.bytes(),
+				Self::ThreadInfo { changes, .. } => {
+					changes.capacity() * size_of::<model::threads::Change>()
+				}
 				Self::ThreadsSync {
 					parents,
 					threads,
@@ -4525,7 +4575,7 @@ impl Event {
 							.map(MemberPresence::heap_bytes)
 							.sum::<usize>()
 				}
-				Self::DirectPresence(updates) => {
+				Self::DirectPresence(updates) | Self::SharedGuildPresence(updates) => {
 					updates.capacity() * size_of::<presence::Update>()
 						+ updates
 							.iter()
@@ -4596,34 +4646,6 @@ impl Event {
 
 #[cfg(test)]
 mod tests {
-
-	#[test]
-	#[ignore = "manual release timing; run with --release --ignored --nocapture"]
-	fn guild_lookup_benchmark() {
-		let state = State {
-			guilds: (1..=1_000)
-				.map(|id| Guild {
-					default_message_notifications: None,
-					stickers: None,
-					id: Id(id),
-					name: "Synthetic".into(),
-					icon: None,
-					emojis: None,
-				})
-				.collect(),
-			..State::default()
-		};
-		for run in 0..6 {
-			let start = std::time::Instant::now();
-			for _ in 0..10_000 {
-				assert!(std::hint::black_box(state.guild(std::hint::black_box(Id(500)))).is_some());
-				assert!(
-					std::hint::black_box(state.guild(std::hint::black_box(Id(1_001)))).is_none()
-				);
-			}
-			println!("guild lookup run {run} (0 = warmup): {:?}", start.elapsed());
-		}
-	}
 
 	pub(crate) fn grant_permissions(state: &mut State) {
 		let Some(user) = &state.user else {
@@ -5095,6 +5117,7 @@ mod tests {
 								tertiary_color: None,
 								position: 0,
 								hoist: false,
+								managed: false,
 								bits: p::VIEW_CHANNEL | p::READ_MESSAGE_HISTORY,
 							}]),
 						})

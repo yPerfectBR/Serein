@@ -85,6 +85,7 @@ hide-chat = Masquer la discussion
 show-chat = Afficher le chat
 search-conversation = Rechercher cette conversation
 show-member-list = Afficher la liste des membres
+show-user-profile = Afficher le profil utilisateur
 pinned-messages = Messages épinglés
 threads = Sujets
 
@@ -4017,6 +4018,8 @@ user-menu-contents-profile = Profil
 # Context: contents
 user-menu-contents-remove-this-conversation-from-your-dm-list-messages-are-kept = Supprimez cette conversation de votre liste DM. Les messages sont conservés.
 # Context: contents
+user-menu-contents-roles = Rôles
+# Context: contents
 user-menu-contents-unblock = Débloquer
 # Context: contents
 user-menu-contents-unmute-conversation = Activer la conversation
@@ -4730,6 +4733,8 @@ composer-placeholder-direct = Envoyer un message à @{ $name }
 
 # Context: timeline_dm_intro
 timeline-dm-intro = Ceci est le début de votre historique de messages privés avec { $name }.
+# Context: timeline_group_intro
+timeline-group-intro = Bienvenue au début du groupe { $name }.
 
 # Context: timeline_channel_intro
 timeline-channel-intro-title = Bienvenue dans #{ $channel } !
@@ -4827,3 +4832,12 @@ search-overlays-no-matching-content-types = Aucun type de contenu correspondant
 search-overlays-history = Historique
 search-overlays-clear-history = Effacer l'historique de recherche
 main-sign-in-rate-limited-detail = Discord limite cette connexion. Patientez avant de réessayer. Une nouvelle tentative trop tôt peut prolonger l'attente.
+
+# New message
+new-message-title = Nouveau message
+new-message-subtitle = Les messages de groupe peuvent compter jusqu'à 10 membres.
+new-message-search = Rechercher
+new-message-hint = Ajoutez des amis pour démarrer un message privé ou un groupe.
+new-message-no-people-found = Personne ne correspond à cette recherche.
+new-message-create = Créer un message
+new-message-cancel = Annuler

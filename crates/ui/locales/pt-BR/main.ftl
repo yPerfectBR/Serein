@@ -85,6 +85,7 @@ hide-chat = Ocultar bate-papo
 show-chat = Mostrar bate-papo
 search-conversation = Pesquisar esta conversa
 show-member-list = Mostrar lista de membros
+show-user-profile = Mostrar perfil do usuário
 pinned-messages = Mensagens fixadas
 threads = Tópicos
 
@@ -4028,6 +4029,8 @@ user-menu-contents-profile = Perfil
 # Context: contents
 user-menu-contents-remove-this-conversation-from-your-dm-list-messages-are-kept = Remova esta conversa da sua lista DM. As mensagens são mantidas.
 # Context: contents
+user-menu-contents-roles = Cargos
+# Context: contents
 user-menu-contents-unblock = Desbloquear
 # Context: contents
 user-menu-contents-unmute-conversation = Ativar conversa
@@ -4741,6 +4744,8 @@ composer-placeholder-direct = Conversar com @{ $name }
 
 # Context: timeline_dm_intro
 timeline-dm-intro = Este é o começo do seu histórico de mensagens diretas com { $name }.
+# Context: timeline_group_intro
+timeline-group-intro = Boas-vindas ao início do grupo { $name }.
 
 # Context: timeline_channel_intro
 timeline-channel-intro-title = Boas-vindas a #{ $channel }!
@@ -4895,3 +4900,11 @@ network-scope-routed = Pelo proxy: o gateway (a sua sessão), a sinalização de
 network-scope-direct = Fora do proxy: a mídia de voz e de transmissão (UDP), a janela de login e o download externo de vídeo ou extensões.
 network-scope-wireguard = Pelo túnel: tudo o que o Serein faz, incluindo gateway, mídia de voz e vídeo, compartilhamento de tela, API REST e imagens. Os outros aplicativos não são afetados.
 network-terms = Usar proxy ou VPN para contornar uma restrição pode violar os Termos de Serviço do Discord, e um login de um lugar inesperado pode exigir verificação extra.
+# New message
+new-message-title = Nova mensagem
+new-message-subtitle = Mensagens de grupo podem ter até 10 membros.
+new-message-search = Pesquisar
+new-message-hint = Adicione amigos para iniciar uma mensagem direta ou um grupo.
+new-message-no-people-found = Ninguém corresponde a essa pesquisa.
+new-message-create = Criar mensagem
+new-message-cancel = Cancelar

@@ -936,6 +936,13 @@ impl DiscordApi {
 						result: result.map(Box::new),
 					});
 				}
+				if let client_core::user_actions::Action::CreateGroup { recipients } = action {
+					return Event::UserAction(client_core::user_actions::Event::GroupCreated {
+						request,
+						result: self.create_group(&recipients).await.map(Box::new),
+						recipients,
+					});
+				}
 				if let client_core::user_actions::Action::LoadNote(user) = action {
 					return Event::UserAction(client_core::user_actions::Event::NoteLoaded {
 						user,
@@ -3366,7 +3373,6 @@ mod tests {
 		.unwrap();
 		api.base = format!("http://{address}");
 		let mut throttled = Vec::new();
-		let started = Instant::now();
 		let event = tokio::time::timeout(
 			Duration::from_secs(5),
 			api.execute_write(
@@ -3383,7 +3389,6 @@ mod tests {
 		.await
 		.unwrap();
 		assert!(matches!(event, Event::SendResult { result: Ok(_), .. }));
-		assert!(started.elapsed() < Duration::from_millis(900));
 		assert_eq!(throttled, ["spam"]);
 		assert_eq!(server.await.unwrap(), [true, true]);
 	}

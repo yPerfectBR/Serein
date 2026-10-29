@@ -85,6 +85,7 @@ hide-chat = Hide chat
 show-chat = Show chat
 search-conversation = Search this conversation
 show-member-list = Show member list
+show-user-profile = Show user profile
 pinned-messages = Pinned messages
 threads = Threads
 
@@ -4045,6 +4046,8 @@ user-menu-contents-profile = Profile
 # Context: contents
 user-menu-contents-remove-this-conversation-from-your-dm-list-messages-are-kept = Remove this conversation from your DM list. Messages are kept.
 # Context: contents
+user-menu-contents-roles = Roles
+# Context: contents
 user-menu-contents-unblock = Unblock
 # Context: contents
 user-menu-contents-unmute-conversation = Unmute Conversation
@@ -4830,6 +4833,8 @@ composer-placeholder-direct = Message @{ $name }
 
 # Context: timeline_dm_intro
 timeline-dm-intro = This is the beginning of your direct message history with { $name }.
+# Context: timeline_group_intro
+timeline-group-intro = Welcome to the beginning of the { $name } group.
 
 # Context: timeline_channel_intro
 timeline-channel-intro-title = Welcome to #{ $channel }!
@@ -4989,3 +4994,11 @@ network-scope-routed = Through the proxy: the gateway (your session), voice and 
 network-scope-direct = Not through the proxy: voice and stream media (UDP), the sign-in window, and external video or extension downloads.
 network-scope-wireguard = Through the tunnel: everything Serein does, including the gateway, voice and video media, screen sharing, the REST API and images. Other apps are not affected.
 network-terms = Using a proxy or VPN to get around a restriction may violate Discord's Terms of Service, and a login from an unexpected place can trigger extra verification.
+# New message
+new-message-title = New Message
+new-message-subtitle = Group DMs can have up to 10 members.
+new-message-search = Search
+new-message-hint = Add friends to start a direct message or a group.
+new-message-no-people-found = No one matches that search.
+new-message-create = Create Message
+new-message-cancel = Cancel

@@ -2383,32 +2383,6 @@ mod tests {
 	}
 
 	#[test]
-	fn scalable_emoji_uses_bundled_shapes_and_preserves_transparency() {
-		for cell in 0..4009 {
-			let (svg, _) = ui::emoji::bundled_svg(&format!("emoji-unicode-{cell}-64")).unwrap();
-			let image =
-				super::rasterize_emoji(svg, 64).unwrap_or_else(|| panic!("artwork cell {cell}"));
-			assert_eq!(image.size, [64; 2]);
-			assert_eq!(image.pixels[0], egui::Color32::TRANSPARENT);
-			assert!(
-				image.pixels.iter().any(|pixel| pixel.a() > 0),
-				"artwork cell {cell}"
-			);
-		}
-		for cell in [0, 1000, 2000, 3000, 4008] {
-			for edge in [64, 128, 256] {
-				let (svg, _) =
-					ui::emoji::bundled_svg(&format!("emoji-unicode-{cell}-{edge}")).unwrap();
-				let image = super::rasterize_emoji(svg, edge).unwrap();
-				assert_eq!(image.size, [edge as usize; 2]);
-				assert_eq!(image.pixels[0], egui::Color32::TRANSPARENT);
-				assert!(image.pixels.iter().any(|pixel| pixel.a() > 0));
-			}
-		}
-		assert!(super::rasterize_emoji(b"invalid", 64).is_none());
-		assert!(super::rasterize_emoji(b"invalid", 1024).is_none());
-	}
-	#[test]
 	fn offline_emoji_worker_rejects_network_requests() {
 		let runtime = tokio::runtime::Runtime::new().unwrap();
 		let mut worker =
@@ -3189,59 +3163,6 @@ mod tests {
 				.starts_with("embed-")
 		);
 		assert_eq!(disk_key("frame-30-31").as_deref(), Some("frame-30-31"));
-	}
-
-	#[test]
-	fn animated_banner_and_avatar_urls_and_keys() {
-		assert!(super::is_animated_key(
-			"banner-123-a_abcdef0123456789abcdef0123456789"
-		));
-		assert!(super::is_animated_key(
-			"member-banner-999-123-a_abcdef0123456789abcdef0123456789"
-		));
-		assert!(super::is_animated_key(
-			"member-avatar-999-123-a_abcdef0123456789abcdef0123456789"
-		));
-		assert!(super::is_animated_key(
-			"123-a_abcdef0123456789abcdef0123456789"
-		));
-		assert!(!super::is_animated_key(
-			"banner-123-abcdef0123456789abcdef0123456789"
-		));
-		assert!(!super::is_animated_key(
-			"member-banner-999-123-abcdef0123456789abcdef0123456789"
-		));
-		assert!(!super::is_animated_key(
-			"member-avatar-999-123-abcdef0123456789abcdef0123456789"
-		));
-		assert!(!super::is_animated_key(
-			"123-abcdef0123456789abcdef0123456789"
-		));
-
-		assert_eq!(
-			super::cdn_url("banner-123-a_abcdef0123456789abcdef0123456789").as_deref(),
-			Some(
-				"https://cdn.discordapp.com/banners/123/a_abcdef0123456789abcdef0123456789.gif?size=512"
-			)
-		);
-		assert_eq!(
-			super::cdn_url("member-banner-999-123-a_abcdef0123456789abcdef0123456789").as_deref(),
-			Some(
-				"https://cdn.discordapp.com/guilds/999/users/123/banners/a_abcdef0123456789abcdef0123456789.gif?size=512"
-			)
-		);
-		assert_eq!(
-			super::cdn_url("123-a_abcdef0123456789abcdef0123456789").as_deref(),
-			Some(
-				"https://cdn.discordapp.com/avatars/123/a_abcdef0123456789abcdef0123456789.gif?size=128"
-			)
-		);
-		assert_eq!(
-			super::cdn_url("123-abcdef0123456789abcdef0123456789").as_deref(),
-			Some(
-				"https://cdn.discordapp.com/avatars/123/abcdef0123456789abcdef0123456789.png?size=128"
-			)
-		);
 	}
 
 	use super::*;

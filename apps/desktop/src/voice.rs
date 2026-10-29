@@ -182,6 +182,8 @@ struct Live {
 struct CallCues {
 	joined: bool,
 	peers: Option<[u64; voice::MAX_PARTICIPANTS]>,
+	/// Peers announcing Go Live in the last snapshot; the local share cues itself.
+	streamers: Option<[u64; voice::MAX_PARTICIPANTS]>,
 }
 impl CallCues {
 	fn poll(
@@ -202,13 +204,33 @@ impl CallCues {
 			return cue;
 		}
 		let mut peers = [0; voice::MAX_PARTICIPANTS];
+		let mut streamers = [0; voice::MAX_PARTICIPANTS];
+		let mut streaming = streamers.iter_mut();
 		for (slot, participant) in peers.iter_mut().zip(
 			participants
 				.iter()
 				.filter(|participant| participant.user != owner),
 		) {
 			*slot = participant.user.0;
+			if participant.streaming
+				&& let Some(stream) = streaming.next()
+			{
+				*stream = participant.user.0;
+			}
 		}
+		let previous_streamers = self
+			.streamers
+			.replace(streamers)
+			.unwrap_or([0; voice::MAX_PARTICIPANTS]);
+		// Discord ranks a new stream above membership changes made in the same update.
+		let stream_cue = self
+			.peers
+			.is_some_and(|_| {
+				streamers
+					.iter()
+					.any(|user| *user != 0 && !previous_streamers.contains(user))
+			})
+			.then_some(Sound::ScreenShareOn);
 		// ponytail: membership scans are capped at 64 IDs; no per-frame set allocation.
 		let membership_cue = self.peers.replace(peers).and_then(|previous| {
 			if previous
@@ -223,7 +245,7 @@ impl CallCues {
 					.then_some(Sound::UserJoin)
 			}
 		});
-		cue.or(membership_cue)
+		cue.or(stream_cue).or(membership_cue)
 	}
 }
 /// Remote cameras kept as textures at once; matches the transport's source limit.
@@ -355,6 +377,15 @@ impl Voice {
 			live.task.abort();
 			self.retiring = Some(live.audio.shutdown());
 		}
+	}
+	/// Hang up this device's call. A call it had joined plays the leave cue on the next poll,
+	/// mirroring its local join cue; a call still connecting ends silently.
+	pub fn hang_up(&mut self, state: &State) {
+		self.leave_cue |= self
+			.live
+			.as_ref()
+			.is_some_and(|live| live.cues.joined && live.generation == state.generation);
+		self.stop();
 	}
 	pub fn stop_camera(&mut self) {
 		if let Some(camera) = &self.camera {
@@ -1314,12 +1345,14 @@ impl Voice {
 	}
 
 	fn poll_camera_test(&mut self, state: &State, ui: &mut ui::MessagingUi, ctx: &egui::Context) {
-		ui.camera_test_available = !state.demo
-			&& ui.voice_available
-			&& discord_voice::camera::SUPPORTED
-			&& state.voice.active.is_none()
-			&& self.pending.is_none()
-			&& self.live.is_none();
+		let in_call = state.voice.active.is_some() || self.pending.is_some() || self.live.is_some();
+		ui.camera_test_available =
+			!state.demo && ui.voice_available && discord_voice::camera::SUPPORTED && !in_call;
+		ui.camera_test_blocked = if in_call {
+			"The preview is off during a call. Turn on your camera in the call to see it here."
+		} else {
+			""
+		};
 		if !ui.camera_test_available || !ui.voice_settings_open() {
 			ui.camera_test_requested = false;
 			ui.camera_test_status = "";
@@ -1327,10 +1360,15 @@ impl Voice {
 		if let Some(preview) = &self.camera_test {
 			if preview.device != ui.voice_camera_device {
 				ui.camera_test_requested = false;
-				ui.camera_test_status = "Camera changed. Click Preview camera to use it.";
+				ui.camera_test_status = "";
+				ui.toasts.push(
+					ui::design::Level::Info,
+					"Camera changed. Click Preview camera to use it.",
+				);
 			} else if let Some(error) = preview.camera.error() {
 				ui.camera_test_requested = false;
-				ui.camera_test_status = error;
+				ui.camera_test_status = "";
+				ui.toasts.push(ui::design::Level::Error, error);
 			}
 		}
 		if !ui.camera_test_requested {
@@ -1366,7 +1404,8 @@ impl Voice {
 				}
 				Err(error) => {
 					ui.camera_test_requested = false;
-					ui.camera_test_status = error;
+					ui.camera_test_status = "";
+					ui.toasts.push(ui::design::Level::Error, error);
 					return;
 				}
 			}
@@ -1455,8 +1494,11 @@ impl Voice {
 		if requested && self.camera.is_some() && self.camera_device != ui.voice_camera_device {
 			self.stop_camera();
 			ui.voice_camera_preview = None;
-			ui.voice_camera_status =
-				"Camera device changed. Turn on the camera to use the selected device.";
+			ui.voice_camera_status = "";
+			ui.toasts.push(
+				ui::design::Level::Info,
+				"Camera device changed. Turn on the camera to use the selected device.",
+			);
 			return state.set_call_camera(false);
 		}
 		let preview_allowed = camera_preview_allowed(state);
@@ -1465,15 +1507,22 @@ impl Voice {
 			self.stop_camera();
 			ui.voice_camera_preview = None;
 			if requested {
-				ui.voice_camera_status =
-					error.unwrap_or("Camera stopped; reconnect securely before turning it on");
+				ui.voice_camera_status = "";
+				ui.toasts.push(
+					ui::design::Level::Error,
+					error.unwrap_or("Camera stopped; reconnect securely before turning it on"),
+				);
 				return state.set_call_camera(false);
 			}
 			return None;
 		}
 		if self.camera_preview.is_none() {
 			if self.camera.is_some() {
-				ui.voice_camera_status = "Camera is still closing; try again shortly";
+				ui.voice_camera_status = "";
+				ui.toasts.push(
+					ui::design::Level::Warning,
+					"Camera is still closing; try again shortly",
+				);
 				return state.set_call_camera(false);
 			}
 			let live = self.live.as_ref()?;
@@ -1485,15 +1534,15 @@ impl Voice {
 			let start = live.camera_clock;
 			let wake = ctx.clone();
 			let on_frame = std::sync::Arc::new(move |frame: discord_voice::camera::Frame| {
+				// Held or dropped pictures carry no H264 but still refresh the local preview.
 				let data = frame.h264;
-				if data.len() > discord_voice::camera_video::MAX_FRAME_BYTES {
-					return;
+				if (1..=discord_voice::camera_video::MAX_FRAME_BYTES).contains(&data.len()) {
+					let _ = send.try_send(discord_voice::camera_video::Frame {
+						generation,
+						timestamp: (start.elapsed().as_micros() * 90 / 1000) as u32,
+						data,
+					});
 				}
-				let _ = send.try_send(discord_voice::camera_video::Frame {
-					generation,
-					timestamp: (start.elapsed().as_micros() * 90 / 1000) as u32,
-					data,
-				});
 				if let Ok(mut slot) = preview.try_lock()
 					&& store_camera_frame(&mut slot, &frame.rgb)
 				{
@@ -1515,7 +1564,8 @@ impl Voice {
 						.send_modify(|controls| controls.camera = generation);
 				}
 				Err(error) => {
-					ui.voice_camera_status = error;
+					ui.voice_camera_status = "";
+					ui.toasts.push(ui::design::Level::Error, error);
 					return state.set_call_camera(false);
 				}
 			}
@@ -1537,7 +1587,8 @@ impl Voice {
 					ctx.request_repaint();
 				}
 			}
-			ui.voice_camera_status = "Camera on · local preview";
+			// The local tile is the confirmation; no lingering status line.
+			ui.voice_camera_status = "";
 		}
 		None
 	}
@@ -1867,13 +1918,45 @@ pub fn debug_call_cues_check() {
 		Some(Sound::UserLeave)
 	);
 	assert_eq!(cues.poll(true, true, owner.user, &[owner]), None);
+	// Another participant going live is announced once; the local share cues itself.
+	let mut streaming_peer = peer;
+	streaming_peer.streaming = true;
+	let mut streaming_owner = owner;
+	streaming_owner.streaming = true;
+	assert_eq!(
+		cues.poll(true, true, owner.user, &[owner, peer]),
+		Some(Sound::UserJoin)
+	);
+	assert_eq!(
+		cues.poll(true, true, owner.user, &[streaming_owner, peer]),
+		None
+	);
+	assert_eq!(
+		cues.poll(true, true, owner.user, &[owner, streaming_peer]),
+		Some(Sound::ScreenShareOn)
+	);
+	assert_eq!(
+		cues.poll(true, true, owner.user, &[owner, streaming_peer]),
+		None
+	);
+	assert_eq!(cues.poll(true, true, owner.user, &[owner, peer]), None);
+	// Streams already live when this device joins or resynchronises are not announced.
+	assert_eq!(cues.poll(true, false, owner.user, &[]), None);
+	assert_eq!(
+		cues.poll(true, true, owner.user, &[owner, streaming_peer]),
+		None
+	);
+	assert_eq!(
+		CallCues::default().poll(true, true, owner.user, &[owner, streaming_peer]),
+		Some(Sound::UserJoin)
+	);
 	assert_eq!(
 		CallCues::default().poll(true, true, owner.user, &[owner]),
 		Some(Sound::UserJoin),
 		"a new explicitly started call has its own join cue"
 	);
 	println!(
-		"Call cue debug check passed: local/remote joins, departures, rekeying and reconnect suppression. No audio devices opened."
+		"Call cue debug check passed: local/remote joins, departures, remote streams, rekeying and reconnect suppression. No audio devices opened."
 	);
 }
 
@@ -1928,18 +2011,6 @@ mod tests {
 		assert_eq!(pictures[0].1.data.as_ptr(), planes);
 		assert_eq!((pictures[0].1.width, pictures[0].1.data.len()), (1, 4));
 		assert!(!store_remote_frame(&mut pictures, frame(&[16], 1)));
-	}
-
-	#[test]
-	fn optimization_local_camera_reuses_the_latest_frame_buffer() {
-		let mut picture = None;
-		let rgb = vec![127; discord_voice::camera::WIDTH * discord_voice::camera::HEIGHT * 3];
-		assert!(store_camera_frame(&mut picture, &rgb));
-		let pixels = picture.as_ref().unwrap().0.pixels.as_ptr();
-		picture.as_mut().unwrap().1 = false;
-		assert!(store_camera_frame(&mut picture, &rgb));
-		assert_eq!(picture.as_ref().unwrap().0.pixels.as_ptr(), pixels);
-		assert!(picture.unwrap().1);
 	}
 
 	#[test]
@@ -2070,6 +2141,7 @@ mod tests {
 					tertiary_color: None,
 					position: 0,
 					hoist: false,
+					managed: false,
 					id: Id(10),
 					bits,
 				}]),
@@ -2157,8 +2229,12 @@ mod tests {
 		assert!(!pending.ring);
 		assert!(manager.live.is_none());
 		state.leave_call();
-		manager.stop();
+		manager.hang_up(&state);
 		assert!(manager.pending.is_none());
+		assert!(
+			!manager.leave_cue,
+			"a call that never connected ends silently"
+		);
 	}
 	#[test]
 	fn a_failed_rejoin_leaves_the_channel_and_plays_the_leave_cue() {

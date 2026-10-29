@@ -646,30 +646,6 @@ mod tests {
 	}
 
 	#[test]
-	fn hidden_title_bar_moves_the_update_prompt_above_the_account_card() {
-		let ctx = egui::Context::default();
-		crate::design::apply(&ctx);
-		let mut state = test_support::demo_state();
-		let mut view = MessagingUi::default();
-		view.updates.available = true;
-		scan(&ctx, &mut view, &mut state);
-		// With Serein's own title bar the prompt stays up there, not in the sidebar.
-		#[cfg(not(target_os = "linux"))]
-		assert!(banner(&scan(&ctx, &mut view, &mut state).0).is_none());
-		view.hide_title_bar = true;
-		let (text, _) = scan(&ctx, &mut view, &mut state);
-		let prompt = banner(&text).expect("sidebar update prompt");
-		let card = text
-			.iter()
-			.find(|(label, _)| label == "Your account" || label == "Kestrel")
-			.map(|(_, rect)| *rect);
-		if let Some(card) = card {
-			assert!(prompt.bottom() < card.top(), "{prompt:?} {card:?}");
-		}
-		assert!(prompt.left() < 400.0, "{prompt:?}");
-	}
-
-	#[test]
 	fn dismissing_the_banner_hides_it_until_the_update_is_ready() {
 		let ctx = egui::Context::default();
 		crate::design::apply(&ctx);
