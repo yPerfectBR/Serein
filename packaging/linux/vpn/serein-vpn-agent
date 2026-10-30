@@ -87,6 +87,38 @@ def peer_is_me(connection):
     return uid == os.getuid()
 
 
+NETNS_RESOLV = "/etc/netns/serein-vpn/resolv.conf"
+MS_BIND = 4096
+
+
+def pin_resolver():
+    """Runs in the child just before exec: give it the tunnel's DNS, whatever the host does to /etc/resolv.conf.
+
+    `ip netns exec` bind-mounts /etc/netns/serein-vpn/resolv.conf over /etc/resolv.conf, but that mount lives in
+    the agent's mount namespace and the kernel detaches it as soon as the host replaces /etc/resolv.conf by
+    rename (Tailscale, NetworkManager, resolvconf...). The host's resolver is usually unreachable from inside the
+    tunnel (MagicDNS 100.100.100.100, a LAN router), so every later Serein launch failed with "Connection failed".
+    A private user+mount namespace per launch lets an unprivileged child re-bind the file itself. Best effort:
+    any failure leaves the child on the agent's own view, as before.
+    """
+    try:
+        uid, gid = os.getuid(), os.getgid()
+        if not os.path.isfile(NETNS_RESOLV):
+            return
+        os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS)
+        with open("/proc/self/setgroups", "w") as handle:
+            handle.write("deny")
+        with open("/proc/self/uid_map", "w") as handle:
+            handle.write(f"{uid} {uid} 1")
+        with open("/proc/self/gid_map", "w") as handle:
+            handle.write(f"{gid} {gid} 1")
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.mount(NETNS_RESOLV.encode(), b"/etc/resolv.conf", None, ctypes.c_ulong(MS_BIND), None)
+    except (OSError, AttributeError, ImportError):
+        pass
+
+
 def handle(connection, executable):
     """Returns False when the agent should stop."""
     if not peer_is_me(connection):
@@ -115,6 +147,7 @@ def handle(connection, executable):
         subprocess.Popen(
             [executable], env=environment, stdin=subprocess.DEVNULL, stdout=log_file(),
             stderr=subprocess.STDOUT, start_new_session=True, close_fds=True,
+            preexec_fn=pin_resolver,
         )
     except OSError:
         connection.sendall(b"error\n")
