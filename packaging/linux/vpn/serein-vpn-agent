@@ -119,6 +119,27 @@ def pin_resolver():
         pass
 
 
+READY_HOST = "gateway.discord.gg"
+
+
+def wait_for_tunnel(budget=3.5):
+    """Block until a TCP connection to Discord succeeds through the tunnel (or a 3.5 s budget runs out: the launcher waits at most 5 s for our reply).
+
+    The first packets after the tunnel comes up only start the WireGuard handshake, and a program that starts
+    immediately burns its small, fixed number of sign-in attempts on a path that is not usable yet, which showed
+    up as "Connection failed" on the first launch after the tunnel was created. Probing here (and thereby
+    completing the handshake and warming DNS) costs well under a second once the tunnel is up."""
+    import time
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((READY_HOST, 443), timeout=4):
+                return True
+        except OSError:
+            time.sleep(0.5)
+    return False
+
+
 def handle(connection, executable):
     """Returns False when the agent should stop."""
     if not peer_is_me(connection):
@@ -143,6 +164,7 @@ def handle(connection, executable):
         connection.sendall(b"ok\n")
         return True
     environment = filter_env(request.get("env"), os.environ)
+    wait_for_tunnel()
     try:
         subprocess.Popen(
             [executable], env=environment, stdin=subprocess.DEVNULL, stdout=log_file(),
