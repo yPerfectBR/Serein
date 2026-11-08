@@ -86,6 +86,7 @@ impl Decoder {
 				&header[4..],
 				b"ftyp" | b"moov" | b"mdat" | b"free" | b"skip" | b"wide"
 			) {
+			eprintln!("[Serein video] unrecognised container header {header:02x?}");
 			return Err(UNSUPPORTED);
 		}
 		gst::init().map_err(|_| UNSUPPORTED)?;
@@ -200,6 +201,7 @@ impl Decoder {
 			.map_err(|_| UNSUPPORTED)?;
 		wait_ready(&pipeline, &shared, deadline)?;
 		if !has_video.load(Ordering::Acquire) {
+			eprintln!("[Serein video] no decodable video stream");
 			return Err(UNSUPPORTED);
 		}
 		let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -500,7 +502,19 @@ fn wait_ready(
 		};
 		match message.view() {
 			gst::MessageView::AsyncDone(_) => return Ok(()),
-			gst::MessageView::Error(_) => return Err(UNSUPPORTED),
+			gst::MessageView::Error(error) => {
+				eprintln!(
+					"[Serein video] {}: {} ({:?})",
+					error.src().map_or_else(Default::default, |src| src.path_string()),
+					error.error(),
+					error.debug(),
+				);
+				return Err(if shared.failed.load(Ordering::Acquire) {
+					INVALID
+				} else {
+					UNSUPPORTED
+				});
+			}
 			gst::MessageView::Eos(_) => return Err(INVALID),
 			gst::MessageView::Element(element) => {
 				if let Some(missing) = missing_video_decoder(element.structure()) {
@@ -535,7 +549,8 @@ fn missing_video_decoder(structure: Option<&gst::StructureRef>) -> Option<&'stat
 fn check_bus(pipeline: &gst::Pipeline) -> Result<(), &'static str> {
 	let bus = pipeline.bus().ok_or(INVALID)?;
 	while let Some(message) = bus.pop_filtered(&[gst::MessageType::Error]) {
-		if let gst::MessageView::Error(_) = message.view() {
+		if let gst::MessageView::Error(error) = message.view() {
+			eprintln!("[Serein video] {} ({:?})", error.error(), error.debug());
 			return Err(INVALID);
 		}
 	}

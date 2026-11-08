@@ -188,6 +188,6 @@ fn convert(
 	if file.metadata().map_err(|_| FAILED)?.len() >= LIMIT {
 		return Err("Converted video exceeds the 100 MiB preview limit");
 	}
-	// macOS keeps the open descriptor valid after unlink; no playback file is retained.
+	// macOS and Linux keep the open descriptor valid after unlink; no playback file is retained.
 	platform::video::Decoder::open(Box::new(file))
 }

@@ -1,5 +1,5 @@
 //! One explicit inline player; native decoding and network reads stay on one lazy worker.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod fallback;
 mod output;
 mod source;
@@ -201,6 +201,10 @@ impl Video {
 						if let Err(error) = result
 							&& !request.session.cancelled.load(Ordering::Acquire)
 						{
+							crate::avatars::media_log(
+								request.url.as_ref().map_or("video", |url| url.as_str()),
+								error,
+							);
 							if let Ok(mut update) = request.session.update.lock() {
 								update.state = VideoState::Failed(error);
 							}
@@ -438,9 +442,13 @@ fn play(
 		runtime.clone(),
 	)?;
 	let result = Decoder::open(source).and_then(|decoder| play_decoded(decoder, session, ctx));
-	#[cfg(target_os = "macos")]
+	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	let result = match result {
 		Err(error) if fallback::eligible(error) && !session.cancelled.load(Ordering::Acquire) => {
+			crate::avatars::media_log(
+				request.url.as_ref().map_or("video", |url| url.as_str()),
+				format_args!("{error}; converting with FFmpeg"),
+			);
 			// Native codecs can fail on the first packet or later in the movie, not just
 			// while opening it. Retry conversion once, after releasing the old decoder
 			// and audio output, and resume from the last displayed position.

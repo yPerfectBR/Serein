@@ -146,6 +146,13 @@ impl Source {
 						.and_then(|value| value.to_str().ok())
 						!= Some(range.as_str())
 					{
+						crate::avatars::media_log(
+							url.as_str(),
+							format_args!(
+								"expected {range}, got {:?}",
+								response.headers().get(reqwest::header::CONTENT_RANGE)
+							),
+						);
 						return Err(invalid());
 					}
 				} else if !(response.status() == reqwest::StatusCode::OK
@@ -162,6 +169,10 @@ impl Source {
 						.content_length()
 						.is_some_and(|len| len != count as u64)
 				{
+					crate::avatars::media_log(
+						url.as_str(),
+						format_args!("unexpected encoding or length for bytes={start}-{end}"),
+					);
 					return Err(invalid());
 				}
 				let mut bytes = Vec::with_capacity(count);
@@ -176,6 +187,10 @@ impl Source {
 					bytes.extend_from_slice(&chunk);
 				}
 				if bytes.len() != count {
+					crate::avatars::media_log(
+						url.as_str(),
+						format_args!("short range: {} of {count} bytes", bytes.len()),
+					);
 					return Err(invalid());
 				}
 				Ok(bytes)
