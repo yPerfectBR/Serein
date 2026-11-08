@@ -16,15 +16,47 @@ const CACHE_CHUNKS: usize = 8;
 const INVALID: &str = "Video download failed or changed; reload the conversation";
 const UNSUPPORTED: &str = "Video server does not support buffering; download to play externally";
 
+/// Range-only reads, for posters that decode a single frame.
 pub(super) fn source(
 	url: Option<url::Url>,
 	expected: usize,
 	cancelled: Arc<AtomicBool>,
 	runtime: Handle,
 ) -> Result<Box<dyn platform::video::ReadSeek>, &'static str> {
+	open(url, expected, cancelled, runtime, false)
+}
+
+/// Playback reads: the whole attachment streams into a cache that outlives this session, so
+/// a slow tunnel pays one request instead of a round trip per range, and replays are local.
+pub(super) fn playback(
+	url: Option<url::Url>,
+	expected: usize,
+	cancelled: Arc<AtomicBool>,
+	runtime: Handle,
+) -> Result<Box<dyn platform::video::ReadSeek>, &'static str> {
+	open(url, expected, cancelled, runtime, true)
+}
+
+/// Drop every cached attachment and abort unfinished downloads (conversation change, hide).
+pub(super) fn release_cache() {
+	if let Ok(mut cache) = CACHE.lock() {
+		for (_, download) in cache.drain(..) {
+			download.task.abort();
+		}
+	}
+}
+
+fn open(
+	url: Option<url::Url>,
+	expected: usize,
+	cancelled: Arc<AtomicBool>,
+	runtime: Handle,
+	whole: bool,
+) -> Result<Box<dyn platform::video::ReadSeek>, &'static str> {
 	if expected == 0 || expected > MAX_BYTES {
 		return Err("Video preview limit: 100 MiB");
 	}
+	let mut download = None;
 	let (input, len) = if let Some(url) = url {
 		// The caller has validated the service URL; never let URL userinfo add credentials.
 		if !url.username().is_empty() || url.password().is_some() {
@@ -41,6 +73,7 @@ pub(super) fn source(
 			.connect_timeout(Duration::from_secs(10))
 			.build()
 			.map_err(|_| INVALID)?;
+		download = whole.then(|| cached(&client, &url, expected, &runtime));
 		(
 			Input::Http {
 				client,
@@ -67,7 +100,119 @@ pub(super) fn source(
 		len,
 		position: 0,
 		cache: VecDeque::new(),
+		download,
 	}))
+}
+
+/// Attachments kept for the open conversation; each is at most `MAX_BYTES`.
+const CACHE_ENTRIES: usize = 4;
+/// A read this close past the downloaded prefix waits for it instead of issuing a range.
+const AHEAD: usize = 4 * 1024 * 1024;
+static CACHE: std::sync::Mutex<Vec<(String, Arc<Download>)>> = std::sync::Mutex::new(Vec::new());
+
+struct Progress {
+	bytes: Vec<u8>,
+	failed: bool,
+}
+struct Download {
+	progress: std::sync::Mutex<Progress>,
+	changed: std::sync::Condvar,
+	task: tokio::task::AbortHandle,
+}
+
+/// The cached download of this attachment, starting it when absent. Signed query strings
+/// change between fetches of one attachment, so the path is the key.
+fn cached(client: &reqwest::Client, url: &url::Url, len: usize, runtime: &Handle) -> Arc<Download> {
+	let key = format!("{}{}", url.host_str().unwrap_or_default(), url.path());
+	let mut cache = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+	if let Some(index) = cache.iter().position(|(cached, download)| {
+		*cached == key
+			&& download
+				.progress
+				.lock()
+				.is_ok_and(|progress| !progress.failed)
+	}) {
+		let entry = cache.remove(index);
+		let download = entry.1.clone();
+		cache.push(entry);
+		return download;
+	}
+	cache.retain(|(cached, download)| {
+		let keep = *cached != key;
+		if !keep {
+			download.task.abort();
+		}
+		keep
+	});
+	while cache.len() >= CACHE_ENTRIES {
+		cache.remove(0).1.task.abort();
+	}
+	let (sender, receiver) = tokio::sync::oneshot::channel::<Arc<Download>>();
+	let task = runtime.spawn({
+		let (client, url) = (client.clone(), url.clone());
+		async move {
+			let Ok(download) = receiver.await else {
+				return;
+			};
+			let result = fetch_whole(&client, &url, len, &download).await;
+			if let Err(error) = &result {
+				crate::avatars::media_log(url.as_str(), format_args!("whole download: {error}"));
+			}
+			if let Ok(mut progress) = download.progress.lock() {
+				progress.failed |= result.is_err();
+			}
+			download.changed.notify_all();
+		}
+	});
+	let download = Arc::new(Download {
+		progress: std::sync::Mutex::new(Progress {
+			bytes: Vec::with_capacity(len),
+			failed: false,
+		}),
+		changed: std::sync::Condvar::new(),
+		task: task.abort_handle(),
+	});
+	let _ = sender.send(download.clone());
+	cache.push((key, download.clone()));
+	download
+}
+
+async fn fetch_whole(
+	client: &reqwest::Client,
+	url: &url::Url,
+	len: usize,
+	download: &Download,
+) -> Result<(), String> {
+	let mut response = client
+		.get(url.clone())
+		.header(reqwest::header::ACCEPT_ENCODING, "identity")
+		.timeout(Duration::from_secs(600))
+		.send()
+		.await
+		.map_err(|error| error.to_string())?;
+	if response.status() != reqwest::StatusCode::OK
+		|| response
+			.headers()
+			.get(reqwest::header::CONTENT_ENCODING)
+			.is_some_and(|value| value != "identity")
+		|| response.content_length().is_some_and(|length| length != len as u64)
+	{
+		return Err(format!("unexpected response {}", response.status()));
+	}
+	while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+		let mut progress = download.progress.lock().map_err(|_| "poisoned")?;
+		if chunk.len() > len - progress.bytes.len() {
+			return Err("longer than the attachment".into());
+		}
+		progress.bytes.extend_from_slice(&chunk);
+		drop(progress);
+		download.changed.notify_all();
+	}
+	let progress = download.progress.lock().map_err(|_| "poisoned")?;
+	if progress.bytes.len() != len {
+		return Err(format!("short body: {} of {len} bytes", progress.bytes.len()));
+	}
+	Ok(())
 }
 
 enum Input {
@@ -85,6 +230,7 @@ struct Source {
 	len: usize,
 	position: usize,
 	cache: VecDeque<(usize, Vec<u8>)>,
+	download: Option<Arc<Download>>,
 }
 fn invalid() -> io::Error {
 	io::Error::new(io::ErrorKind::InvalidData, INVALID)
@@ -223,6 +369,30 @@ impl Read for Source {
 			output[..count].copy_from_slice(&bytes[self.position..self.position + count]);
 			self.position += count;
 			return Ok(count);
+		}
+		if let Some(download) = self.download.clone() {
+			let mut progress = download.progress.lock().map_err(|_| invalid())?;
+			loop {
+				let have = progress.bytes.len();
+				if self.position < have {
+					count = count.min(have - self.position);
+					output[..count]
+						.copy_from_slice(&progress.bytes[self.position..self.position + count]);
+					self.position += count;
+					return Ok(count);
+				}
+				// A failed download, or a jump well past it (a trailing movie index, a
+				// seek), falls back to ranges.
+				if progress.failed || self.position >= have + AHEAD || have == self.len {
+					break;
+				}
+				progress = download
+					.changed
+					.wait_timeout(progress, Duration::from_millis(50))
+					.map_err(|_| invalid())?
+					.0;
+				self.check_cancelled()?;
+			}
 		}
 		if let Some(index) = self.cache.iter().position(|(start, bytes)| {
 			self.position >= *start && self.position < start + bytes.len()

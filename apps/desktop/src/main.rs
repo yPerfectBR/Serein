@@ -5948,6 +5948,9 @@ impl eframe::App for Desktop {
 			self.messaging.audio().stop();
 			self.video.stop();
 			self.messaging.video().stop();
+			self.video.release_cache(None);
+		} else {
+			self.video.release_cache(self.state.selected);
 		}
 		self.video.poll(self.messaging.video(), ctx);
 		let audio = self.audio.poll();

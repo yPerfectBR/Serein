@@ -70,6 +70,8 @@ pub struct Video {
 	poster_cancelled: Arc<AtomicBool>,
 	/// GPU texture of the playing attachment.
 	texture: crate::gpu_video::VideoTexture,
+	/// Conversation whose played videos stay cached.
+	cache_channel: Option<model::Id>,
 }
 
 /// In-flight poster ceiling; excess requests retry while still visible.
@@ -82,6 +84,13 @@ impl Video {
 		self.texture = Default::default();
 		if let Some(requests) = &self.requests {
 			requests.send_replace(None);
+		}
+	}
+	/// Leaving a conversation (or hiding the window) frees the downloaded playback videos.
+	pub fn release_cache(&mut self, channel: Option<model::Id>) {
+		if self.cache_channel != channel {
+			self.cache_channel = channel;
+			source::release_cache();
 		}
 	}
 	/// Session boundary: abandons queued and in-flight posters so none of their downloads
@@ -435,7 +444,7 @@ fn play(
 ) -> Result<(), &'static str> {
 	use platform::video::Decoder;
 	let session = &request.session;
-	let source = source::source(
+	let source = source::playback(
 		request.url.clone(),
 		request.size,
 		session.cancelled.clone(),
@@ -459,7 +468,7 @@ fn play(
 				0.
 			};
 			ctx.request_repaint();
-			let source = source::source(
+			let source = source::playback(
 				request.url.clone(),
 				request.size,
 				session.cancelled.clone(),
