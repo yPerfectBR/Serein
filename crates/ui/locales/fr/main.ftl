@@ -51,8 +51,10 @@ general-start-minimized = Démarrer réduit
 general-start-minimized-description = Commencez en arrière-plan, hors de votre chemin.
 general-startup-unavailable = Le démarrage automatique est disponible sur Windows et macOS.
 general-window = Fenêtre
-general-hide-decorations = Masquer les décorations de fenêtres
-general-hide-decorations-description = Supprimez la barre de titre et les bordures du système. Utilisez votre gestionnaire de fenêtres pour déplacer, redimensionner ou fermer Serein.
+general-hide-decorations = Pas de barre de titre
+general-hide-decorations-description = Pour les gestionnaires de fenêtres en mosaïque : supprime toutes les barres de titre et bordures, y compris celle de Serein. Déplacez, redimensionnez ou fermez Serein avec votre gestionnaire de fenêtres.
+general-custom-title-bar = Barre de titre personnalisée
+general-custom-title-bar-description = Remplace la barre de titre du système par la barre d'en-tête propre à Serein, dans le style de GTK 4.
 general-hide-title-bar = Masquer la barre de titre Serein
 general-hide-title-bar-description = Utilisez plutôt la barre de titre du système et les boutons de la fenêtre.
 general-keep-menu-bar = Gardez Serein dans la barre de menu
@@ -65,6 +67,8 @@ general-graphics = Graphique
 general-render-with = Rendu avec
 general-gpu-restart = Prend effet au prochain démarrage de Serein.
 general-gpu-current-prefix = Je dessine actuellement avec
+general-steady-refresh-rate = Fréquence de rafraîchissement fixe
+general-steady-refresh-rate-description = Tant que Serein est la fenêtre active, le dessin se fait à la fréquence de rafraîchissement de l'écran, afin que les écrans à fréquence de rafraîchissement variable (VRR, G-SYNC, FreeSync) puissent garder une seule fréquence au lieu de scintiller. Consomme plus d'énergie.
 gpu-automatic = Automatique
 gpu-high-performance = Hautes performances
 gpu-power-saving = Économie d'énergie
@@ -85,7 +89,6 @@ hide-chat = Masquer la discussion
 show-chat = Afficher le chat
 search-conversation = Rechercher cette conversation
 show-member-list = Afficher la liste des membres
-show-user-profile = Afficher le profil utilisateur
 pinned-messages = Messages épinglés
 threads = Sujets
 
@@ -1536,6 +1539,14 @@ join-server-status-invite-accepted = Invitation acceptée. En attente d'accès a
 join-server-status-offline-preview = Aperçu hors ligne : la connexion aux serveurs est désactivée.
 
 ## crates/ui/src/keybinds.rs
+# Context: custom_row
+keybinds-custom-row-remove = Supprimer
+# Context: custom_section
+keybinds-custom-section-add-binding = Ajouter un raccourci
+# Context: custom_section
+keybinds-custom-section-add-extra-shortcuts-for-any-action-each-key-or-mouse-button-combination-can-only-be-used-once = Ajoutez des raccourcis supplémentaires pour n'importe quelle action. Chaque combinaison de touche ou de bouton de souris ne peut servir qu'une fois.
+# Context: custom_section
+keybinds-custom-section-custom-bindings = Raccourcis personnalisés
 # Context: row
 keybinds-row-global = MONDIAL
 # Context: row
@@ -1630,8 +1641,6 @@ main-restoring-screen-use-a-different-account = Utiliser un autre compte
 main-restoring-screen-welcome-back = Content de te revoir
 # Context: sign_in_accounts
 main-sign-in-accounts-saved-accounts = Comptes enregistrés
-# Context: sign_in_consent
-main-sign-in-consent-i-own-this-account-and-authorize-this-session = Je suis propriétaire de ce compte et j'autorise cette session.
 # Context: sign_in_consent
 main-sign-in-consent-passwords-and-2fa-stay-on-discord-s-own-login-page = Les mots de passe et 2FA restent sur la propre page de connexion de Discord ; seul le jeton de session est conservé dans le magasin d'informations d'identification de votre système d'exploitation.
 # Context: sign_in_disclosures
@@ -1776,6 +1785,10 @@ notification-settings-notification-settings-for-per-channel-or-per-server-notifi
 notification-settings-notification-settings-open = Ouvrir
 # Context: notification_settings
 notification-settings-notification-settings-preview-sound = Aperçu du son
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-activate = Pousser pour parler : activation
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-deactivate = Pousser pour parler : désactivation
 # Context: notification_settings
 notification-settings-notification-settings-ringtones-call-devices-and-microphone-processing = Sonneries, appareils d'appel et traitement du microphone.
 # Context: notification_settings
@@ -2055,21 +2068,21 @@ profiles-activity-card-activity-options = Options d'activité
 # Context: activity_card
 profiles-activity-card-copy-activity = Activité de copie
 # Context: activity_card
-profiles-activity-card-listening-to-spotify = Écouter Spotify
+profiles-activity-card-listening-to-spotify = Écoute Spotify
 # Context: activity_row
-profiles-activity-row-show = Montrer
+profiles-activity-row-show = Montre
 # Context: activity_verb
 profiles-activity-verb-activity = Activité
 # Context: activity_verb
-profiles-activity-verb-competing-in = En compétition
+profiles-activity-verb-competing-in = En compétition sur
 # Context: activity_verb
-profiles-activity-verb-listening-to = Écouter
+profiles-activity-verb-listening-to = Écoute
 # Context: activity_verb
-profiles-activity-verb-playing = Jouant
+profiles-activity-verb-playing = Joue à
 # Context: activity_verb
-profiles-activity-verb-streaming = Streaming
+profiles-activity-verb-streaming = Streame
 # Context: activity_verb
-profiles-activity-verb-watching = Regarder
+profiles-activity-verb-watching = Regarde
 # Context: more_menu
 profiles-more-menu-add-friend-nickname = Ajouter un pseudo d'ami
 # Context: more_menu
@@ -2242,6 +2255,12 @@ screen-body-frame-rate = Fréquence d'images
 screen-body-include-the-pointer-in-the-shared-video = Incluez le pointeur dans la vidéo partagée.
 # Context: body
 screen-body-quality = Qualité
+# Context: body
+screen-body-source = Source
+# Context: body
+screen-preview-paused-title = Votre stream est toujours en cours !
+# Context: body
+screen-preview-paused-body = Nous avons mis cet aperçu en pause pour économiser vos ressources.
 # Context: body
 screen-body-quality-selection-does-not-require-nitro = La sélection de qualité ne nécessite pas de Nitro.
 # Context: body
@@ -3982,7 +4001,29 @@ updates-update-settings-restart-to-update = Redémarrer pour mettre à jour
 # Context: update_settings
 updates-update-settings-serein-was-installed-via-your-distribution-run-this-in-a = Serein a été installé via votre distribution. Exécutez ceci dans un terminal pour mettre à jour.
 # Context: update_settings
+updates-update-settings-save-diagnostics = Enregistrer le diagnostic
+# Context: update_settings
 updates-update-settings-support-diagnostics = Assistance et diagnostic
+# Context: update_settings
+updates-update-settings-copy-recent-lines = Copier les dernières lignes
+# Context: update_settings
+updates-update-settings-diagnostic-log = Journal de diagnostic
+# Context: update_settings
+updates-update-settings-log-errors = Erreurs
+# Context: update_settings
+updates-update-settings-log-events = Erreurs, avertissements et événements
+# Context: update_settings
+updates-update-settings-log-everything = Tout (détaillé)
+# Context: update_settings
+updates-update-settings-log-off = Désactivé
+# Context: update_settings
+updates-update-settings-log-warnings = Erreurs et avertissements
+# Context: update_settings
+updates-update-settings-open-folder = Ouvrir le dossier
+# Context: update_settings
+updates-update-settings-the-log-folder-could-not-be-written = Impossible d’écrire le dossier du journal. Vérifiez le dossier de données de Serein et réessayez.
+# Context: update_settings
+updates-update-settings-timings-stages-and-failures-in-one-local-file-no-account-channel-or = Durées, étapes et échecs dans un seul fichier journal local. Les données de compte, de salon, de message et les identifiants ne sont jamais écrits, et rien n’est envoyé.
 # Context: update_log
 updates-update-log = Journal des mises à jour
 # Context: update_settings
@@ -4103,8 +4144,6 @@ voice-device-combo-device-unavailable = Appareil indisponible
 voice-device-default = Valeur par défaut du système
 # Context: frame
 voice-frame-open-voice = Voix ouverte
-# Context: gain_controls
-voice-gain-controls-100-is-the-original-level-higher-levels-may-distort = 100 % est le niveau d'origine. Des niveaux plus élevés peuvent entraîner une distorsion.
 # Context: labels
 voice-labels-choose-camera = Choisir l'appareil photo
 # Context: live_badge
@@ -4205,12 +4244,6 @@ voice-voice-participant-microphone-muted = Microphone coupé
 voice-voice-participant-muted-by-server = Muet par le serveur
 # Context: voice_participant
 voice-voice-participant-muted-for-you-on-this-device = Muet pour vous sur cet appareil
-# Context: voice_popup_content
-voice-voice-popup-content-choose-an-algorithm-in-all-voice-settings = Choisissez un algorithme dans tous les paramètres vocaux.
-# Context: voice_popup_content
-voice-voice-popup-content-deafen-turns-off-incoming-audio-and-mutes-your-microphone-with = Deafen désactive le son entrant et coupe votre microphone avec.
-# Context: voice_popup_content
-voice-voice-popup-content-hold-your-configured-shortcut-when-you-want-to-speak = Maintenez votre raccourci configuré lorsque vous souhaitez parler.
 # Context: voice_popup_content
 voice-voice-popup-content-install-a-voice-enabled-build-to-use-these-controls = Installez une version à commande vocale pour utiliser ces commandes.
 # Context: voice_popup_content
@@ -4456,6 +4489,7 @@ lib-composer-onboarding-incomplete = Termine de rejoindre ce serveur pour déblo
 lib-composer-onboarding-complete = Terminer l'accueil
 profiles-message-placeholder = Message à @{ $user }
 profiles-message-send = Envoyer le message
+profiles-message-open-chat = Ouvrir la discussion
 profiles-message-sending = Ouverture du message privé…
 user-menu-contents-start-a-call = Démarrer un appel
 verification-show-complete-the-check-to-open-this-conversation = Termine la vérification pour ouvrir cette conversation.
@@ -4740,6 +4774,9 @@ timeline-group-intro = Bienvenue au début du groupe { $name }.
 timeline-channel-intro-title = Bienvenue dans #{ $channel } !
 # Context: timeline_channel_intro
 timeline-channel-intro-start = Ceci est le début du salon #{ $channel }.
+show-user-profile = Afficher le profil
+hide-user-profile = Masquer le profil
+view-full-profile = Voir le profil complet
 # Context: text_menu
 text-menu-cut = Couper
 text-menu-copy = Copier

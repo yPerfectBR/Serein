@@ -51,8 +51,10 @@ general-start-minimized = 最小化して開始
 general-start-minimized-description = 邪魔にならないバックグラウンドで開始します。
 general-startup-unavailable = 自動起動は Windows と macOS で利用できます。
 general-window = ウィンドウ
-general-hide-decorations = ウィンドウの装飾を隠す
-general-hide-decorations-description = システムのタイトルバーと境界線を削除します。ウィンドウ マネージャーを使用して、Serein を移動、サイズ変更、または閉じます。
+general-hide-decorations = タイトルバーなし
+general-hide-decorations-description = タイル型ウィンドウ マネージャー向け: Serein 独自のものを含め、すべてのタイトルバーと境界線を削除します。Serein の移動、サイズ変更、終了はウィンドウ マネージャーで行います。
+general-custom-title-bar = カスタムタイトルバー
+general-custom-title-bar-description = システムのタイトルバーを Serein 独自の GTK 4 風ヘッダーバーに置き換えます。
 general-hide-title-bar = セレインのタイトルバーを非表示にする
 general-hide-title-bar-description = 代わりに、システムのタイトル バーとウィンドウ ボタンを使用してください。
 general-keep-menu-bar = セレインをメニューバーに置いておく
@@ -65,6 +67,8 @@ general-graphics = グラフィックス
 general-render-with = でレンダリング
 general-gpu-restart = 次回セレイン起動時に有効となります。
 general-gpu-current-prefix = 現在絵を描いているのは
+general-steady-refresh-rate = リフレッシュレートを固定
+general-steady-refresh-rate-description = Serein がアクティブなウィンドウの間は、ディスプレイのリフレッシュレートで描画するため、可変リフレッシュレート (VRR、G-SYNC、FreeSync) のディスプレイでもちらつかずに一定のレートを保てます。消費電力が増えます。
 gpu-automatic = 自動
 gpu-high-performance = 高性能
 gpu-power-saving = 省電力
@@ -85,7 +89,6 @@ hide-chat = チャットを非表示にする
 show-chat = チャットを表示する
 search-conversation = この会話を検索
 show-member-list = メンバーリストを表示
-show-user-profile = ユーザープロフィールを表示
 pinned-messages = 固定メッセージ
 threads = スレッド
 
@@ -1537,6 +1540,14 @@ join-server-status-invite-accepted = 招待を承認しました。サーバー�
 join-server-status-offline-preview = オフライン プレビュー — サーバーへの参加は無効になっています。
 
 ## crates/ui/src/keybinds.rs
+# Context: custom_row
+keybinds-custom-row-remove = 削除
+# Context: custom_section
+keybinds-custom-section-add-binding = ショートカットを追加
+# Context: custom_section
+keybinds-custom-section-add-extra-shortcuts-for-any-action-each-key-or-mouse-button-combination-can-only-be-used-once = 任意のアクションに追加のショートカットを割り当てます。キーやマウスボタンの組み合わせは1回しか使えません。
+# Context: custom_section
+keybinds-custom-section-custom-bindings = カスタムショートカット
 # Context: row
 keybinds-row-global = グローバル
 # Context: row
@@ -1631,8 +1642,6 @@ main-restoring-screen-use-a-different-account = 別のアカウントを使用�
 main-restoring-screen-welcome-back = おかえり
 # Context: sign_in_accounts
 main-sign-in-accounts-saved-accounts = 保存されたアカウント
-# Context: sign_in_consent
-main-sign-in-consent-i-own-this-account-and-authorize-this-session = 私はこのアカウントを所有しており、このセッションを承認しています。
 # Context: sign_in_consent
 main-sign-in-consent-passwords-and-2fa-stay-on-discord-s-own-login-page = パスワードと 2FA は Discord 自体のログイン ページに残ります。セッション トークンのみが OS 資格情報ストアに保持されます。
 # Context: sign_in_disclosures
@@ -1777,6 +1786,10 @@ notification-settings-notification-settings-for-per-channel-or-per-server-notifi
 notification-settings-notification-settings-open = 開ける
 # Context: notification_settings
 notification-settings-notification-settings-preview-sound = サウンドのプレビュー
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-activate = プッシュして話す：開始
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-deactivate = プッシュして話す：終了
 # Context: notification_settings
 notification-settings-notification-settings-ringtones-call-devices-and-microphone-processing = 着信音、通話デバイス、マイクの処理。
 # Context: notification_settings
@@ -2243,6 +2256,12 @@ screen-body-frame-rate = フレームレート
 screen-body-include-the-pointer-in-the-shared-video = 共有ビデオにポインターを含めます。
 # Context: body
 screen-body-quality = 品質
+# Context: body
+screen-body-source = ソース
+# Context: body
+screen-preview-paused-title = 配信は続行中です！
+# Context: body
+screen-preview-paused-body = リソースを節約するため、このプレビューを一時停止しました。
 # Context: body
 screen-body-quality-selection-does-not-require-nitro = 品質の選択にはニトロは必要ありません。
 # Context: body
@@ -3976,7 +3995,29 @@ updates-update-settings-restart-to-update = 更新するには再起動してく
 # Context: update_settings
 updates-update-settings-serein-was-installed-via-your-distribution-run-this-in-a = Serein はディストリビューション経由でインストールされました。ターミナルでこれを実行して更新します。
 # Context: update_settings
+updates-update-settings-save-diagnostics = 診断を保存
+# Context: update_settings
 updates-update-settings-support-diagnostics = サポートと診断
+# Context: update_settings
+updates-update-settings-copy-recent-lines = 最近の行をコピー
+# Context: update_settings
+updates-update-settings-diagnostic-log = 診断ログ
+# Context: update_settings
+updates-update-settings-log-errors = エラー
+# Context: update_settings
+updates-update-settings-log-events = エラー、警告、イベント
+# Context: update_settings
+updates-update-settings-log-everything = すべて（詳細）
+# Context: update_settings
+updates-update-settings-log-off = オフ
+# Context: update_settings
+updates-update-settings-log-warnings = エラーと警告
+# Context: update_settings
+updates-update-settings-open-folder = フォルダーを開く
+# Context: update_settings
+updates-update-settings-the-log-folder-could-not-be-written = ログフォルダーに書き込めませんでした。Serein のデータフォルダーを確認して、もう一度お試しください。
+# Context: update_settings
+updates-update-settings-timings-stages-and-failures-in-one-local-file-no-account-channel-or = タイミング、段階、失敗を 1 つのローカルログファイルに記録します。アカウント、チャンネル、メッセージ、認証情報は書き込まれず、どこにも送信されません。
 # Context: update_log
 updates-update-log = 更新履歴
 # Context: update_settings
@@ -4097,8 +4138,6 @@ voice-device-combo-device-unavailable = デバイスが使用不可
 voice-device-default = システムのデフォルト
 # Context: frame
 voice-frame-open-voice = オープンな声
-# Context: gain_controls
-voice-gain-controls-100-is-the-original-level-higher-levels-may-distort = 100% が元のレベルです。レベルを高くすると歪む可能性があります。
 # Context: labels
 voice-labels-choose-camera = カメラを選択してください
 # Context: live_badge
@@ -4199,12 +4238,6 @@ voice-voice-participant-microphone-muted = マイクがミュートされまし�
 voice-voice-participant-muted-by-server = サーバーによってミュートされています
 # Context: voice_participant
 voice-voice-participant-muted-for-you-on-this-device = このデバイスではミュートされています
-# Context: voice_popup_content
-voice-voice-popup-content-choose-an-algorithm-in-all-voice-settings = すべての音声設定でアルゴリズムを選択します。
-# Context: voice_popup_content
-voice-voice-popup-content-deafen-turns-off-incoming-audio-and-mutes-your-microphone-with = Deafen は受信音声をオフにし、マイクをミュートします。
-# Context: voice_popup_content
-voice-voice-popup-content-hold-your-configured-shortcut-when-you-want-to-speak = 話したいときは、設定したショートカットを長押しします。
 # Context: voice_popup_content
 voice-voice-popup-content-install-a-voice-enabled-build-to-use-these-controls = これらのコントロールを使用するには、音声対応ビルドをインストールします。
 # Context: voice_popup_content
@@ -4442,6 +4475,7 @@ lib-composer-onboarding-incomplete = 参加を完了すると、さらにチャ�
 lib-composer-onboarding-complete = オンボーディングを完了
 profiles-message-placeholder = @{ $user } にメッセージ
 profiles-message-send = メッセージを送信
+profiles-message-open-chat = チャットを開く
 profiles-message-sending = ダイレクトメッセージを開いています…
 user-menu-contents-start-a-call = 通話を開始
 verification-show-complete-the-check-to-open-this-conversation = 確認を完了してこの会話を開いてください。
@@ -4726,6 +4760,9 @@ timeline-group-intro = グループ「{ $name }」の始まりへようこそ。
 timeline-channel-intro-title = #{ $channel } へようこそ！
 # Context: timeline_channel_intro
 timeline-channel-intro-start = #{ $channel } チャンネルの始まりです。
+show-user-profile = ユーザープロフィールを表示
+hide-user-profile = ユーザープロフィールを非表示
+view-full-profile = プロフィール全体を表示
 # Context: text_menu
 text-menu-cut = 切り取り
 text-menu-copy = コピー

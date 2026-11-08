@@ -169,7 +169,7 @@ impl Decoder {
 					link_branch(
 						&pipeline,
 						pad,
-						&["queue", "videoflip", "videoconvert"],
+						&["videoflip", "videoscale", "videoconvert", "queue"],
 						&[("videoflip", "video-direction", "auto")],
 						video.upcast_ref(),
 					)
@@ -294,7 +294,7 @@ impl Decoder {
 		self.last_video_pts = pts;
 		Ok(Poll::Ready(Some(Sample::Video {
 			pts: self.last_video_pts,
-			picture: picture(&sample)?,
+			picture: picture(&sample, super::check_dimensions)?,
 		})))
 	}
 
@@ -379,6 +379,14 @@ fn link_branch(
 				element.set_property_from_str(name, value);
 			}
 		}
+		if *factory == "videoscale" {
+			bound_playback_scale(&element, sink)?;
+		}
+		if *factory == "queue" && factories.contains(&"videoscale") {
+			// Raw video reaches this queue only after scaling. Bound both bytes and count.
+			element.set_property("max-size-buffers", 4_u32);
+			element.set_property("max-size-bytes", super::MAX_FRAME_BYTES as u32);
+		}
 		elements.push(element);
 	}
 	elements.push(sink.clone());
@@ -392,6 +400,41 @@ fn link_branch(
 	for element in &elements {
 		element.sync_state_with_parent().map_err(|_| UNSUPPORTED)?;
 	}
+	Ok(())
+}
+
+/// Negotiate the oriented source into a bounded output before any application queue.
+/// The probe runs before videoscale handles CAPS, so the downstream size is available
+/// for negotiation, including later resolution/rotation changes.
+fn bound_playback_scale(scale: &gst::Element, sink: &gst::Element) -> Result<(), &'static str> {
+	let pad = scale.static_pad("sink").ok_or(INVALID)?;
+	let sink = sink.clone();
+	pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, probe| {
+		let Some(gst::PadProbeData::Event(event)) = &probe.data else {
+			return gst::PadProbeReturn::Ok;
+		};
+		let gst::EventView::Caps(event) = event.view() else {
+			return gst::PadProbeReturn::Ok;
+		};
+		let fitted = gst_video::VideoInfo::from_caps(event.caps())
+			.ok()
+			.and_then(|info| super::playback_dimensions(info.width(), info.height()).ok());
+		let Some((width, height)) = fitted else {
+			let _ = sink.post_message(gst::message::Error::new(gst::StreamError::Format, INVALID));
+			return gst::PadProbeReturn::Drop;
+		};
+		let mut caps = planar_caps();
+		let structure = caps
+			.make_mut()
+			.structure_mut(0)
+			.expect("one video structure");
+		structure.set("width", width as i32);
+		structure.set("height", height as i32);
+		if sink.property::<Option<gst::Caps>>("caps").as_ref() != Some(&caps) {
+			sink.set_property("caps", &caps);
+		}
+		gst::PadProbeReturn::Ok
+	});
 	Ok(())
 }
 
@@ -521,13 +564,18 @@ pub(super) fn planar_caps() -> gst::Caps {
 }
 
 /// Copies one NV12 or I420 sample into a tightly packed [`Picture`] with its colorimetry.
-pub(super) fn picture(sample: &gst::Sample) -> Result<Picture, &'static str> {
-	let (width, height) = frame_dimensions(sample)?;
+pub(super) fn picture(
+	sample: &gst::Sample,
+	check_dimensions: fn(u32, u32) -> Result<(), &'static str>,
+) -> Result<Picture, &'static str> {
 	let caps = sample.caps().ok_or(INVALID)?;
 	let info = gst_video::VideoInfo::from_caps(caps).map_err(|_| INVALID)?;
+	let (width, height) = (info.width(), info.height());
+	check_dimensions(width, height)?;
 	let layout = match info.format() {
 		gst_video::VideoFormat::Nv12 => Layout::Nv12,
-		_ => Layout::I420,
+		gst_video::VideoFormat::I420 => Layout::I420,
+		_ => return Err(INVALID),
 	};
 	let colorimetry = info.colorimetry();
 	let full_range = colorimetry.range() == gst_video::VideoColorRange::Range0_255;
@@ -652,6 +700,45 @@ mod tests {
 	}
 
 	#[test]
+	fn uhd_samples_copy_planes_and_oversized_samples_stay_bounded() {
+		gst::init().unwrap();
+		let info = gst_video::VideoInfo::builder(gst_video::VideoFormat::I420, 3840, 2160)
+			.build()
+			.unwrap();
+		let mut bytes = vec![128; info.size()];
+		bytes[0] = 16;
+		*bytes.last_mut().unwrap() = 240;
+		let sample = gst::Sample::builder()
+			.caps(&info.to_caps().unwrap())
+			.buffer(&gst::Buffer::from_slice(bytes))
+			.build();
+		// Inline playback shares the live 4K bound.
+		assert!(picture(&sample, super::super::check_dimensions).is_ok());
+		let decoded = picture(&sample, super::super::check_live_dimensions).unwrap();
+		assert_eq!((decoded.width, decoded.height), (3840, 2160));
+		assert!(decoded.is_valid());
+		assert_eq!(decoded.data[0], 16);
+		assert_eq!(decoded.data.last(), Some(&240));
+		// No buffer is needed to reject these: check dimensions before mapping/allocating.
+		for (width, height) in [(3841, 1), (3840, 2161), (3840, 3840)] {
+			let caps = gst_video::VideoInfo::builder(gst_video::VideoFormat::I420, width, height)
+				.build()
+				.unwrap()
+				.to_caps()
+				.unwrap();
+			let sample = gst::Sample::builder().caps(&caps).build();
+			assert_eq!(
+				picture(&sample, super::super::check_live_dimensions),
+				Err("Live playback supports videos up to 4K (3840×2160).")
+			);
+			assert_eq!(
+				picture(&sample, super::super::check_dimensions),
+				Err(super::super::TOO_LARGE)
+			);
+		}
+	}
+
+	#[test]
 	fn missing_video_decoders_are_named_and_audio_ones_ignored() {
 		gst::init().unwrap();
 		let missing = |kind: &str, caps: &str| {
@@ -759,5 +846,54 @@ mod tests {
 		assert!(wait_for_sample(&mut decoder, Decoder::poll_audio).is_none());
 		assert!(wait_for_sample(&mut decoder, Decoder::poll_video).is_some());
 		assert!(Decoder::open(Box::new(std::io::Cursor::new(vec![0_u8; 64]))).is_err());
+	}
+	#[test]
+	fn encoded_attachment_larger_than_the_texture_edge_decodes_to_a_bounded_picture() {
+		let bytes = include_bytes!("../../../../apps/desktop/tests/fixtures/video-wide.mov");
+		let mut decoder = Decoder::open(Box::new(std::io::Cursor::new(bytes.as_slice()))).unwrap();
+		assert_eq!((decoder.info().width, decoder.info().height), (3840, 60));
+		let Sample::Video { picture, .. } =
+			wait_for_sample(&mut decoder, Decoder::poll_video).unwrap()
+		else {
+			panic!("missing video picture");
+		};
+		assert_eq!((picture.width, picture.height), (3840, 60));
+		assert!(picture.is_valid());
+	}
+
+	#[test]
+	fn oversized_rotated_sources_are_scaled_before_reaching_the_frame_queue() {
+		gst::init().unwrap();
+		let pipeline = gst::Pipeline::new();
+		let _stop = StopOnError(Some(pipeline.clone()));
+		let source = make("videotestsrc").unwrap();
+		source.set_property("num-buffers", 1_i32);
+		let filter = make("capsfilter").unwrap();
+		let input = gst_video::VideoInfo::builder(gst_video::VideoFormat::I420, 4160, 2080)
+			.build()
+			.unwrap();
+		filter.set_property("caps", input.to_caps().unwrap());
+		pipeline.add_many([&source, &filter]).unwrap();
+		source.link(&filter).unwrap();
+		let sink = gst_app::AppSink::builder()
+			.sync(false)
+			.max_buffers(1)
+			.build();
+		sink.set_caps(Some(&planar_caps()));
+		link_branch(
+			&pipeline,
+			&filter.static_pad("src").unwrap(),
+			&["videoflip", "videoscale", "videoconvert", "queue"],
+			&[("videoflip", "video-direction", "90r")],
+			sink.upcast_ref(),
+		)
+		.unwrap();
+		pipeline.set_state(gst::State::Playing).unwrap();
+		let sample = sink
+			.try_pull_sample(gst::ClockTime::from_seconds(10))
+			.unwrap();
+		let decoded = picture(&sample, super::super::check_dimensions).unwrap();
+		assert_eq!((decoded.width, decoded.height), (1920, 3840));
+		assert!(decoded.is_valid());
 	}
 }

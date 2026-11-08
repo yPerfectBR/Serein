@@ -67,6 +67,8 @@ const API_ORIGINS: [&str; 2] = [
 	"https://ptb.discord.com/api/v10",
 ];
 static API_ON_TEST_HOST: AtomicBool = AtomicBool::new(false);
+/// One thread channel, or one message, stays far below this documented read budget.
+const THREAD_PREVIEW_BYTES: usize = 64 * 1024;
 
 /// Later lookups in this process follow a Cloudflare block of discord.com.
 pub fn api_v10_base() -> &'static str {
@@ -198,7 +200,42 @@ fn fingerprint_headers() -> Result<reqwest::header::HeaderMap, Failure> {
 		reqwest::header::REFERER,
 		HeaderValue::from_static("https://discord.com/channels/@me"),
 	);
+	headers.insert(reqwest::header::ACCEPT, HeaderValue::from_static("*/*"));
+	headers.insert(
+		reqwest::header::ACCEPT_ENCODING,
+		HeaderValue::from_static(client_core::fingerprint::accept_encoding()),
+	);
+	headers.insert(
+		"x-debug-options",
+		HeaderValue::from_static("bugReporterEnabled"),
+	);
+	headers.insert("sec-fetch-dest", HeaderValue::from_static("empty"));
+	headers.insert("sec-fetch-mode", HeaderValue::from_static("cors"));
+	headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+	if let Some(hints) = client_core::fingerprint::client_hints() {
+		for (name, value) in hints {
+			headers.insert(
+				name,
+				HeaderValue::from_str(&value).map_err(|_| Failure::Network)?,
+			);
+		}
+		headers.insert("priority", HeaderValue::from_static("u=1, i"));
+	}
 	Ok(headers)
+}
+/// Applies the advertised browser's user agent and HTTP/2 flow-control windows. rustls'
+/// TLS handshake cannot be shaped like a browser's, so this covers only what reqwest exposes.
+pub(crate) fn browser_transport(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+	let (stream, connection) = client_core::fingerprint::http2_windows();
+	let builder = builder
+		.user_agent(client_core::fingerprint::user_agent())
+		.http2_adaptive_window(false)
+		.http2_initial_stream_window_size(stream)
+		.http2_initial_connection_window_size(connection);
+	match client_core::fingerprint::http2_max_header_list_size() {
+		Some(size) => builder.http2_max_header_list_size(size),
+		None => builder,
+	}
 }
 fn api_client(route: &proxy::ApiProxy) -> Result<Client, Failure> {
 	let builder = Client::builder()
@@ -207,8 +244,8 @@ fn api_client(route: &proxy::ApiProxy) -> Result<Client, Failure> {
 		.retry(reqwest::retry::never())
 		.timeout(Duration::from_secs(20))
 		.connect_timeout(Duration::from_secs(10))
-		.user_agent(client_core::fingerprint::user_agent())
 		.default_headers(fingerprint_headers()?);
+	let builder = browser_transport(builder);
 	route
 		.client_builder(builder)
 		.map_err(Failure::ProtocolAt)?
@@ -589,6 +626,11 @@ impl DiscordApi {
 				{
 					return Ok(br#"{"note":""}"#.to_vec());
 				}
+				if error.code == Some(160004) {
+					return Err(Failure::ProtocolAt(
+						client_core::channel_actions::THREAD_ALREADY_OPENED,
+					));
+				}
 				return Err(if status == StatusCode::FORBIDDEN {
 					Failure::Forbidden
 				} else if status.is_server_error() && write {
@@ -688,9 +730,15 @@ impl DiscordApi {
 			)
 			.await
 			.and_then(|bytes| {
-				discord_protocol::invites::decode(&bytes)
-					.map(|p| p.guild)
-					.map_err(|_| Failure::Ambiguous)
+				let preview =
+					discord_protocol::invites::decode(&bytes).map_err(|_| Failure::Ambiguous)?;
+				if let Some(guild) = preview.guild {
+					Ok(model::JoinedTarget::Guild(guild))
+				} else if let Some(channel) = preview.channel {
+					Ok(model::JoinedTarget::Channel(channel))
+				} else {
+					Err(Failure::Ambiguous)
+				}
 			})
 		} else {
 			Err(Failure::Protocol)
@@ -742,6 +790,64 @@ impl DiscordApi {
 		(guild.id.0 != 0)
 			.then_some(guild.id)
 			.ok_or(Failure::Ambiguous)
+	}
+	/// A thread card's latest message, plus the thread's channel when this session lacks it.
+	///
+	/// Both reads are documented and bounded: the channel route proves the thread and names it,
+	/// and the message route returns at most one message. An answer that describes another
+	/// thread, or a message of another channel, is rejected rather than shown.
+	async fn thread_preview(
+		&self,
+		guild: Id,
+		thread: Id,
+		needs_channel: bool,
+	) -> Result<client_core::thread_previews::Loaded, Failure> {
+		if thread.0 == 0 || guild.0 == 0 {
+			return Err(Failure::Protocol);
+		}
+		let channel = if needs_channel {
+			let bytes = self
+				.request_limited(
+					Method::GET,
+					&format!("/channels/{thread}"),
+					None,
+					THREAD_PREVIEW_BYTES,
+				)
+				.await?;
+			let dto: ChannelDto = decode(&bytes).map_err(|_| Failure::Protocol)?;
+			if dto.id != thread || dto.guild_id.is_some_and(|id| id != guild) {
+				return Err(Failure::Protocol);
+			}
+			let named = dto
+				.name
+				.as_deref()
+				.is_some_and(|name| !name.trim().is_empty());
+			let channel = discord_protocol::threads::into_thread(dto, guild)
+				.map_err(|_| Failure::Protocol)?;
+			named.then_some(channel)
+		} else {
+			None
+		};
+		let bytes = self
+			.request_limited(
+				Method::GET,
+				&format!("/channels/{thread}/messages?limit=1"),
+				None,
+				THREAD_PREVIEW_BYTES,
+			)
+			.await?;
+		let mut messages: Vec<MessageDto> = decode(&bytes).map_err(|_| Failure::Protocol)?;
+		if messages.len() > 1 {
+			return Err(Failure::Capacity);
+		}
+		let last = messages.pop().map(MessageDto::into_model);
+		if last
+			.as_ref()
+			.is_some_and(|message| message.id.0 == 0 || message.channel != thread)
+		{
+			return Err(Failure::Protocol);
+		}
+		Ok(client_core::thread_previews::Loaded { channel, last })
 	}
 	/// One bounded 50-message history page, before or after a cursor or at the latest message.
 	async fn history(
@@ -1062,6 +1168,16 @@ impl DiscordApi {
 					result,
 				}
 			}
+			Command::ThreadPreview {
+				guild,
+				thread,
+				needs_channel,
+				request,
+			} => Event::ThreadPreview {
+				thread,
+				request,
+				result: self.thread_preview(guild, thread, needs_channel).await,
+			},
 			Command::Pins {
 				channel,
 				before,
@@ -1098,9 +1214,20 @@ impl DiscordApi {
 				result: self.gifs(query.as_deref()).await,
 			},
 			Command::CancelGifs => Event::Failure(Failure::Protocol),
-			Command::GifFavorites { request, change } => Event::GifFavorites {
+			Command::GifFavorites { request, change } => {
+				let (result, frequent_emoji) = match self.gif_favorites(change).await {
+					Ok((gifs, emoji)) => (Ok(gifs), emoji),
+					Err(failure) => (Err(failure), Default::default()),
+				};
+				Event::GifFavorites {
+					request,
+					result,
+					frequent_emoji,
+				}
+			}
+			Command::EmojiFrecency { request, uses } => Event::EmojiFrecency {
 				request,
-				result: self.gif_favorites(change).await,
+				result: self.emoji_frecency(uses).await,
 			},
 			Command::MarkRead {
 				channel,
@@ -1119,6 +1246,7 @@ impl DiscordApi {
 					result,
 				})
 			}
+			Command::Typing { channel } => Event::TypingSent(self.trigger_typing(channel).await),
 			Command::MarkGuildRead { guild, request } => {
 				let result = self.mark_guild_read(guild).await;
 				Event::ReadState(client_core::read_state::Event::GuildAck {
@@ -1660,6 +1788,18 @@ impl DiscordApi {
 		*token = next;
 		Ok(())
 	}
+	/// Documented Trigger Typing Indicator; Discord shows it to others for ten seconds or until
+	/// this account's next message.
+	pub async fn trigger_typing(&self, channel: model::Id) -> Result<(), Failure> {
+		self.request_limited(
+			Method::POST,
+			&format!("/channels/{channel}/typing"),
+			None,
+			4096,
+		)
+		.await
+		.map(|_| ())
+	}
 	async fn mark_guild_read(&self, guild: model::Id) -> Result<(), Failure> {
 		self.request_limited(Method::POST, &format!("/guilds/{guild}/ack"), None, 4096)
 			.await
@@ -2084,6 +2224,50 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn typing_indicator_posts_an_empty_documented_request() {
+		use tokio::{
+			io::{AsyncReadExt, AsyncWriteExt},
+			net::TcpListener,
+		};
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let mut api = DiscordApi::new(Arc::new(
+			SessionSecret::from_owner_input("SYNTHETIC_TYPING_TOKEN".into()).unwrap(),
+		))
+		.unwrap();
+		api.base = format!("http://{}", listener.local_addr().unwrap());
+		let server = tokio::spawn(async move {
+			let (mut socket, _) = listener.accept().await.unwrap();
+			let mut request = Vec::new();
+			while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+				let mut bytes = [0; 1024];
+				let n = socket.read(&mut bytes).await.unwrap();
+				assert!(n > 0 && request.len() < 4096);
+				request.extend_from_slice(&bytes[..n]);
+			}
+			let header = String::from_utf8(request).unwrap();
+			assert!(header.starts_with("POST /channels/7/typing HTTP/1.1\r\n"));
+			assert!(
+				!header
+					.to_ascii_lowercase()
+					.contains("content-type: application/json")
+			);
+			socket
+				.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+				.await
+				.unwrap();
+		});
+		let event = tokio::time::timeout(
+			Duration::from_secs(10),
+			api.execute(Command::Typing {
+				channel: model::Id(7),
+			}),
+		)
+		.await
+		.unwrap();
+		assert!(matches!(event, Event::TypingSent(Ok(()))));
+		server.await.unwrap();
+	}
+	#[tokio::test]
 	async fn preloads_give_way_to_clicks_instead_of_waiting() {
 		let api = DiscordApi::new(Arc::new(
 			SessionSecret::from_owner_input("SYNTHETIC_PRELOAD_TOKEN".into()).unwrap(),
@@ -2344,7 +2528,11 @@ mod tests {
 				(
 					std::time::Instant::now(),
 					Some(Ok(model::InvitePreview {
-						guild: model::Id(2),
+						guild: Some(model::Id(2)),
+						about: None,
+						guild_icon: None,
+						voice_channel: None,
+						channel: None,
 						embed: Default::default(),
 					})),
 				),
@@ -2368,7 +2556,7 @@ mod tests {
 			assert!(matches!(
 				api.execute(command).await,
 				Event::JoinInvite {
-					result: Ok(model::Id(2)),
+					result: Ok(model::JoinedTarget::Guild(model::Id(2))),
 					..
 				}
 			));
@@ -3556,6 +3744,98 @@ mod tests {
 		}
 		assert!(safe_delay(Some(f64::NAN)).is_err());
 		assert!(safe_delay(Some(-1.0)).is_err());
+	}
+
+	#[tokio::test]
+	async fn thread_cards_read_the_channel_then_one_message_and_reject_foreign_answers() {
+		use tokio::{
+			io::{AsyncReadExt, AsyncWriteExt},
+			net::TcpListener,
+		};
+		async fn serve(listener: &TcpListener, path: &str, body: &str) {
+			let (mut socket, _) = listener.accept().await.unwrap();
+			let mut request = Vec::new();
+			loop {
+				let mut bytes = [0; 1024];
+				let n = socket.read(&mut bytes).await.unwrap();
+				assert!(n > 0 && request.len() < 64 * 1024);
+				request.extend_from_slice(&bytes[..n]);
+				if request.windows(4).any(|window| window == b"\r\n\r\n") {
+					break;
+				}
+			}
+			let request = String::from_utf8(request).unwrap();
+			assert!(
+				request.starts_with(&format!("GET {path} HTTP/1.1\r\n")),
+				"{request}"
+			);
+			socket
+				.write_all(
+					format!(
+						"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+						body.len()
+					)
+					.as_bytes(),
+				)
+				.await
+				.unwrap();
+		}
+		let channel = r#"{"id":"70","guild_id":"1","parent_id":"20","type":11,"name":"Synthetic thread","message_count":3,"last_message_id":"81"}"#;
+		for (channel_id, accepted) in [("70", true), ("71", false)] {
+			let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+			let mut api = DiscordApi::new(Arc::new(
+				SessionSecret::from_owner_input("SYNTHETIC_THREAD_CARD_TOKEN".into()).unwrap(),
+			))
+			.unwrap();
+			api.base = format!("http://{}", listener.local_addr().unwrap());
+			let body = format!(
+				r#"[{{"id":"81","channel_id":"{channel_id}","author":{{"id":"9","username":"Synthetic"}},"content":"Latest reply"}}]"#
+			);
+			let server = tokio::spawn(async move {
+				serve(&listener, "/channels/70", channel).await;
+				serve(&listener, "/channels/70/messages?limit=1", &body).await;
+			});
+			let event = tokio::time::timeout(
+				Duration::from_secs(10),
+				api.execute(Command::ThreadPreview {
+					guild: Id(1),
+					thread: Id(70),
+					needs_channel: true,
+					request: 7,
+				}),
+			)
+			.await
+			.unwrap();
+			server.await.unwrap();
+			let Event::ThreadPreview {
+				thread,
+				request,
+				result,
+			} = event
+			else {
+				panic!("ThreadPreview")
+			};
+			assert_eq!((thread, request), (Id(70), 7));
+			if accepted {
+				let loaded = result.expect("both documented reads answer");
+				assert_eq!(
+					loaded
+						.channel
+						.expect("the thread channel names the card")
+						.name,
+					"Synthetic thread"
+				);
+				assert_eq!(
+					loaded
+						.last
+						.expect("the latest message fills the card")
+						.content,
+					"Latest reply"
+				);
+			} else {
+				assert_eq!(result.err(), Some(Failure::Protocol));
+			}
+		}
 	}
 }
 

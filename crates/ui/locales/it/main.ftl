@@ -51,8 +51,10 @@ general-start-minimized = Inizia minimizzato
 general-start-minimized-description = Inizia in background, fuori dai piedi.
 general-startup-unavailable = L'avvio automatico è disponibile su Windows e macOS.
 general-window = Finestra
-general-hide-decorations = Nascondi le decorazioni delle finestre
-general-hide-decorations-description = Rimuovere la barra del titolo e i bordi del sistema. Usa il tuo window manager per spostare, ridimensionare o chiudere Serein.
+general-hide-decorations = Nessuna barra del titolo
+general-hide-decorations-description = Per i window manager a tiling: rimuove tutte le barre del titolo e i bordi, inclusa quella di Serein. Sposta, ridimensiona o chiudi Serein con il tuo window manager.
+general-custom-title-bar = Barra del titolo personalizzata
+general-custom-title-bar-description = Sostituisce la barra del titolo del sistema con la barra di intestazione di Serein in stile GTK 4.
 general-hide-title-bar = Nascondi la barra del titolo Serein
 general-hide-title-bar-description = Utilizzare invece la barra del titolo del sistema e i pulsanti della finestra.
 general-keep-menu-bar = Mantieni Serein nella barra dei menu
@@ -65,6 +67,8 @@ general-graphics = Grafica
 general-render-with = Renderizzare con
 general-gpu-restart = Ha effetto al successivo avvio di Serein.
 general-gpu-current-prefix = Attualmente disegno con
+general-steady-refresh-rate = Frequenza di aggiornamento costante
+general-steady-refresh-rate-description = Finché Serein è la finestra attiva, disegna alla frequenza di aggiornamento del display, così i display a frequenza di aggiornamento variabile (VRR, G-SYNC, FreeSync) possono mantenere una sola frequenza invece di sfarfallare. Consuma più energia.
 gpu-automatic = Automatico
 gpu-high-performance = Prestazioni elevate
 gpu-power-saving = Risparmio energetico
@@ -85,7 +89,6 @@ hide-chat = Nascondi chat
 show-chat = Mostra chat
 search-conversation = Cerca questa conversazione
 show-member-list = Mostra l'elenco dei membri
-show-user-profile = Mostra profilo utente
 pinned-messages = Messaggi fissati
 threads = Discussioni
 
@@ -1536,6 +1539,14 @@ join-server-status-invite-accepted = Invito accettato. In attesa dell'accesso al
 join-server-status-offline-preview = Anteprima offline: l'accesso ai server è disabilitato.
 
 ## crates/ui/src/keybinds.rs
+# Context: custom_row
+keybinds-custom-row-remove = Rimuovi
+# Context: custom_section
+keybinds-custom-section-add-binding = Aggiungi scorciatoia
+# Context: custom_section
+keybinds-custom-section-add-extra-shortcuts-for-any-action-each-key-or-mouse-button-combination-can-only-be-used-once = Aggiungi scorciatoie extra per qualsiasi azione. Ogni combinazione di tasto o pulsante del mouse può essere usata una sola volta.
+# Context: custom_section
+keybinds-custom-section-custom-bindings = Scorciatoie personalizzate
 # Context: row
 keybinds-row-global = GLOBALE
 # Context: row
@@ -1630,8 +1641,6 @@ main-restoring-screen-use-a-different-account = Utilizza un account diverso
 main-restoring-screen-welcome-back = Bentornato
 # Context: sign_in_accounts
 main-sign-in-accounts-saved-accounts = Account salvati
-# Context: sign_in_consent
-main-sign-in-consent-i-own-this-account-and-authorize-this-session = Possiedo questo account e autorizzo questa sessione.
 # Context: sign_in_consent
 main-sign-in-consent-passwords-and-2fa-stay-on-discord-s-own-login-page = Le password e la 2FA rimangono sulla pagina di accesso di Discord; viene conservato solo il token della sessione, nell'archivio delle credenziali del sistema operativo.
 # Context: sign_in_disclosures
@@ -1776,6 +1785,10 @@ notification-settings-notification-settings-for-per-channel-or-per-server-notifi
 notification-settings-notification-settings-open = Aprire
 # Context: notification_settings
 notification-settings-notification-settings-preview-sound = Anteprima del suono
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-activate = Spingi per parlare: attiva
+# Context: notification_settings
+notification-settings-notification-settings-push-to-talk-deactivate = Spingi per parlare: disattiva
 # Context: notification_settings
 notification-settings-notification-settings-ringtones-call-devices-and-microphone-processing = Suonerie, dispositivi di chiamata ed elaborazione microfonica.
 # Context: notification_settings
@@ -2242,6 +2255,12 @@ screen-body-frame-rate = Frequenza fotogrammi
 screen-body-include-the-pointer-in-the-shared-video = Includi il puntatore nel video condiviso.
 # Context: body
 screen-body-quality = Qualità
+# Context: body
+screen-body-source = Sorgente
+# Context: body
+screen-preview-paused-title = Il tuo stream è ancora attivo!
+# Context: body
+screen-preview-paused-body = Abbiamo messo in pausa questa anteprima per risparmiare risorse.
 # Context: body
 screen-body-quality-selection-does-not-require-nitro = La selezione della qualità non richiede Nitro.
 # Context: body
@@ -3982,7 +4001,29 @@ updates-update-settings-restart-to-update = Riavvia per aggiornare
 # Context: update_settings
 updates-update-settings-serein-was-installed-via-your-distribution-run-this-in-a = Serein è stato installato tramite la tua distribuzione. Eseguilo in un terminale per aggiornare.
 # Context: update_settings
+updates-update-settings-save-diagnostics = Salva diagnostica
+# Context: update_settings
 updates-update-settings-support-diagnostics = Supporto e diagnostica
+# Context: update_settings
+updates-update-settings-copy-recent-lines = Copia le righe recenti
+# Context: update_settings
+updates-update-settings-diagnostic-log = Registro di diagnostica
+# Context: update_settings
+updates-update-settings-log-errors = Errori
+# Context: update_settings
+updates-update-settings-log-events = Errori, avvisi ed eventi
+# Context: update_settings
+updates-update-settings-log-everything = Tutto (dettagliato)
+# Context: update_settings
+updates-update-settings-log-off = Disattivato
+# Context: update_settings
+updates-update-settings-log-warnings = Errori e avvisi
+# Context: update_settings
+updates-update-settings-open-folder = Apri cartella
+# Context: update_settings
+updates-update-settings-the-log-folder-could-not-be-written = Impossibile scrivere la cartella del registro. Controlla la cartella dati di Serein e riprova.
+# Context: update_settings
+updates-update-settings-timings-stages-and-failures-in-one-local-file-no-account-channel-or = Tempi, fasi ed errori in un unico file di registro locale. I dati di account, canali, messaggi e le credenziali non vengono mai scritti e nulla viene caricato.
 # Context: update_log
 updates-update-log = Registro aggiornamenti
 # Context: update_settings
@@ -4103,8 +4144,6 @@ voice-device-combo-device-unavailable = Dispositivo non disponibile
 voice-device-default = Predefinito del sistema
 # Context: frame
 voice-frame-open-voice = Voce aperta
-# Context: gain_controls
-voice-gain-controls-100-is-the-original-level-higher-levels-may-distort = 100% è il livello originale. Livelli più alti potrebbero distorcere.
 # Context: labels
 voice-labels-choose-camera = Scegli la fotocamera
 # Context: live_badge
@@ -4205,12 +4244,6 @@ voice-voice-participant-microphone-muted = Microfono disattivato
 voice-voice-participant-muted-by-server = Disattivato dal server
 # Context: voice_participant
 voice-voice-participant-muted-for-you-on-this-device = Disattivato per te su questo dispositivo
-# Context: voice_popup_content
-voice-voice-popup-content-choose-an-algorithm-in-all-voice-settings = Scegli un algoritmo in tutte le impostazioni vocali.
-# Context: voice_popup_content
-voice-voice-popup-content-deafen-turns-off-incoming-audio-and-mutes-your-microphone-with = Deafen disattiva l'audio in entrata e disattiva il microfono.
-# Context: voice_popup_content
-voice-voice-popup-content-hold-your-configured-shortcut-when-you-want-to-speak = Tieni premuta la scorciatoia configurata quando vuoi parlare.
 # Context: voice_popup_content
 voice-voice-popup-content-install-a-voice-enabled-build-to-use-these-controls = Installa una build con attivazione vocale per utilizzare questi controlli.
 # Context: voice_popup_content
@@ -4456,6 +4489,7 @@ lib-composer-onboarding-incomplete = Completa l'accesso a questo server per sblo
 lib-composer-onboarding-complete = Completa l'accoglienza
 profiles-message-placeholder = Messaggio a @{ $user }
 profiles-message-send = Invia messaggio
+profiles-message-open-chat = Apri chat
 profiles-message-sending = Apertura del messaggio diretto…
 user-menu-contents-start-a-call = Avvia una chiamata
 verification-show-complete-the-check-to-open-this-conversation = Completa la verifica per aprire questa conversazione.
@@ -4740,6 +4774,9 @@ timeline-group-intro = Benvenuto all'inizio del gruppo { $name }.
 timeline-channel-intro-title = Benvenuto in #{ $channel }!
 # Context: timeline_channel_intro
 timeline-channel-intro-start = Questo è l'inizio del canale #{ $channel }.
+show-user-profile = Mostra profilo utente
+hide-user-profile = Nascondi profilo utente
+view-full-profile = Visualizza profilo completo
 # Context: text_menu
 text-menu-cut = Taglia
 text-menu-copy = Copia

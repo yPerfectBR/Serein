@@ -50,11 +50,16 @@ pub struct AppPreferences {
 	pub convert_emoticons: bool,
 	/// Request a conversation's page while the pointer rests on it; older preferences enable it.
 	pub preload_on_hover: bool,
+	/// Show as Idle after 10 minutes of system inactivity; older preferences enable it.
+	pub auto_idle: bool,
 	/// Hide the in-app title strip. macOS and Windows then show the system title bar.
 	pub hide_title_bar: bool,
 	/// Keep the home list's message requests section collapsed after a restart.
 	pub message_requests_collapsed: bool,
 	pub hide_window_decorations: bool,
+	/// Linux: replace the system title bar with Serein's own GTK 4 style header bar.
+	/// On by default, including for saved preferences from before the setting existed.
+	pub custom_title_bar: bool,
 	pub primary_color: Option<[u8; 3]>,
 	pub transparency_blur: bool,
 	pub transparency: u8,
@@ -73,6 +78,11 @@ pub struct AppPreferences {
 	pub output_percent: u16,
 	/// Which GPU renders the window; applied on the next start.
 	pub gpu_preference: model::GpuPreference,
+	/// Preferred graphics API; applied on restart, with Automatic as a driver fallback.
+	pub graphics_api: model::GraphicsApi,
+	/// Repaint every display refresh while the window is focused, so variable refresh rate
+	/// displays hold one rate; older preferences deserialize with it off.
+	pub steady_refresh_rate: bool,
 	/// Device-local, account-independent keyboard bindings.
 	pub keybinds: model::Keybinds,
 	/// Expanded server folders, bounded so one device preference stays small.
@@ -89,6 +99,11 @@ pub struct AppPreferences {
 	pub time_format: model::TimeFormat,
 	/// Owner opt-in: keep saved logins in private plain files when no OS keyring works.
 	pub plaintext_login: bool,
+	/// Owner opt-in diagnostic log; older preferences deserialize with logging off.
+	pub diagnostics_log: diagnostics::Level,
+	/// First-run setup finished or skipped; absent in older preferences, so existing installs
+	/// see it once too.
+	pub setup_done: bool,
 }
 impl Default for AppPreferences {
 	fn default() -> Self {
@@ -103,9 +118,11 @@ impl Default for AppPreferences {
 			hide_nitro_emojis: false,
 			convert_emoticons: false,
 			preload_on_hover: true,
+			auto_idle: true,
 			hide_title_bar: false,
 			message_requests_collapsed: false,
 			hide_window_decorations: false,
+			custom_title_bar: true,
 			primary_color: None,
 			transparency_blur: false,
 			transparency: 15,
@@ -120,6 +137,8 @@ impl Default for AppPreferences {
 			input_percent: 100,
 			output_percent: 100,
 			gpu_preference: Default::default(),
+			graphics_api: Default::default(),
+			steady_refresh_rate: false,
 			keybinds: Default::default(),
 			expanded_folders: Vec::new(),
 			user_volumes: Vec::new(),
@@ -128,6 +147,8 @@ impl Default for AppPreferences {
 			image_cache: Default::default(),
 			time_format: Default::default(),
 			plaintext_login: false,
+			diagnostics_log: diagnostics::Level::Off,
+			setup_done: false,
 		}
 	}
 }
@@ -2168,18 +2189,61 @@ mod tests {
 			serde_json::from_str(r#"{"voice_noise_suppression":true}"#).unwrap();
 		assert!(legacy.voice_processing.is_none());
 		assert!(legacy.voice_noise_suppression);
+		// Existing installs run first-run setup once, like a fresh one.
+		assert!(!legacy.setup_done);
 		// Existing serialized bindings omit the newly optional diagnostics shortcut.
 		let mut old_bindings = serde_json::to_value(model::Keybinds::default()).unwrap();
 		old_bindings
 			.as_object_mut()
 			.unwrap()
 			.remove("copy_issue_diagnostics");
+		// Files written before custom bindings existed have no `custom` key at all.
+		old_bindings.as_object_mut().unwrap().remove("custom");
 		let restored: model::Keybinds = serde_json::from_value(old_bindings).unwrap();
 		assert!(restored.is_valid());
+		assert!(restored.custom.is_empty());
 		assert_eq!(restored.copy_issue_diagnostics, model::KeyChord::new("", 0));
 		assert_eq!(
 			restored.send_message,
 			model::Keybinds::default().send_message
+		);
+		// An action this build no longer has drops only its own row.
+		let lenient: model::Keybinds = serde_json::from_value(serde_json::json!({
+			"custom": [
+				{"action": "push_to_talk", "chord": {"key": "Y", "modifiers": 0}},
+				{"action": "removed_action", "chord": {"key": "Q", "modifiers": 0}},
+				{"action": "bold", "chord": {"key": "G", "modifiers": 0}},
+			]
+		}))
+		.unwrap();
+		assert_eq!(
+			lenient.custom,
+			vec![
+				model::CustomBinding {
+					action: model::KeybindAction::PushToTalk,
+					chord: model::KeyChord::new("Y", 0),
+				},
+				model::CustomBinding {
+					action: model::KeybindAction::Bold,
+					chord: model::KeyChord::new("G", 0),
+				},
+			]
+		);
+		// The saved file keeps the full action and chord of every extra binding.
+		let saved = AppPreferences {
+			keybinds: model::Keybinds {
+				custom: vec![model::CustomBinding {
+					action: model::KeybindAction::ToggleDeafen,
+					chord: model::KeyChord::new("F9", 0),
+				}],
+				..Default::default()
+			},
+			..Default::default()
+		};
+		store.save_app_preferences(&saved).unwrap();
+		assert_eq!(
+			store.app_preferences().unwrap().keybinds.custom,
+			saved.keybinds.custom
 		);
 		let mut value = AppPreferences {
 			language: Some("cs".into()),
@@ -2202,6 +2266,8 @@ mod tests {
 			voice_input: Some("synthetic microphone".into()),
 			output_percent: 75,
 			gpu_preference: model::GpuPreference::PowerSaving,
+			graphics_api: model::GraphicsApi::OpenGl,
+			steady_refresh_rate: true,
 			..Default::default()
 		};
 		store.save_app_preferences(&value).unwrap();
@@ -2251,9 +2317,14 @@ mod tests {
 		);
 		// Older rows show no cosmetics (they are opt-in) and keep the historical budgets.
 		let legacy: AppPreferences = serde_json::from_str("{}").unwrap();
+		assert_eq!(legacy.graphics_api, model::GraphicsApi::Automatic);
 		assert_eq!(legacy.cosmetics, model::CosmeticPreferences::default());
 		assert_eq!(legacy.image_cache, model::CachePreferences::default());
 		assert_eq!(legacy.time_format, model::TimeFormat::Auto);
+		assert!(
+			legacy.auto_idle,
+			"older preferences enable Go idle when away"
+		);
 		for (key, format) in [
 			("12-hour", model::TimeFormat::TwelveHour),
 			("24-hour", model::TimeFormat::TwentyFourHour),
@@ -2289,13 +2360,18 @@ mod tests {
 				.0
 				.execute(
 					"INSERT INTO app_preferences VALUES(1,?1)",
-					[r#"{"gpu_preference":"quantum-gpu"}"#],
+					[
+						r#"{"gpu_preference":"quantum-gpu","graphics_api":"future-api","steady_refresh_rate":true}"#,
+					],
 				)
 				.unwrap();
 			assert_eq!(
 				store.app_preferences().unwrap().gpu_preference,
 				model::GpuPreference::Automatic
 			);
+			let saved = store.app_preferences().unwrap();
+			assert_eq!(saved.graphics_api, model::GraphicsApi::Automatic);
+			assert!(saved.steady_refresh_rate);
 		}
 	}
 	use super::*;

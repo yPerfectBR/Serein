@@ -9,7 +9,7 @@ use tokio::time::Instant;
 
 /// The published list is a few megabytes of JSON; refuse anything beyond a generous cap.
 const MAX_LIST: usize = 24 * 1024 * 1024;
-/// The published list holds roughly 24,000 applications, of which under half are detectable.
+/// The published list holds roughly 24,000 applications.
 const MAX_GAMES: usize = 65_536;
 const MAX_EXECUTABLES: usize = 16;
 const MAX_NAME: usize = 128;
@@ -19,7 +19,9 @@ const MAX_NAME: usize = 128;
 pub struct Game {
 	pub id: Id,
 	pub name: String,
-	/// Lowercase, forward-slashed executable names, launchers excluded.
+	/// Lowercase, forward-slashed executable names, launchers excluded. Empty for a game
+	/// Discord detects by other means; its title still resolves a manually added game.
+	#[serde(default)]
 	pub executables: Vec<String>,
 }
 
@@ -96,7 +98,7 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Game>, &'static str> {
 				.collect();
 			executables.sort();
 			executables.dedup();
-			(!executables.is_empty()).then_some(Game {
+			Some(Game {
 				id,
 				name,
 				executables,
@@ -207,7 +209,6 @@ fn bound(mut games: Vec<Game>) -> Result<Vec<Game>, &'static str> {
 			&& !game.name.is_empty()
 			&& game.name.len() <= MAX_NAME
 			&& !game.name.chars().any(char::is_control)
-			&& !game.executables.is_empty()
 			&& game.executables.len() <= MAX_EXECUTABLES
 			&& game
 				.executables
@@ -222,26 +223,56 @@ fn bound(mut games: Vec<Game>) -> Result<Vec<Game>, &'static str> {
 
 /// Executable-name lookup built once per sharing session. Comparing every running process
 /// against every entry is quadratic and far too slow to repeat on a timer.
-pub struct Index(HashMap<String, (Id, String)>);
+pub struct Index {
+	names: HashMap<String, (Id, String)>,
+	/// Windows only exposes image names, while Discord's list often stores
+	/// `win64/cs2.exe` or a launcher-relative path. Bare inputs fall back here.
+	basenames: HashMap<String, (Id, String)>,
+	/// Lowercase titles; `None` when several applications share one, so a guess never wins.
+	titles: HashMap<String, Option<Id>>,
+}
 
 impl Index {
 	pub fn new(games: &[Game]) -> Self {
 		let mut names = HashMap::with_capacity(games.len());
+		let mut basenames = HashMap::with_capacity(games.len());
+		let mut titles = HashMap::with_capacity(games.len());
 		for game in games {
+			titles
+				.entry(game.name.to_lowercase())
+				.and_modify(|claim| {
+					if *claim != Some(game.id) {
+						*claim = None;
+					}
+				})
+				.or_insert(Some(game.id));
 			for executable in &game.executables {
 				// The first claim wins, so a later entry cannot shadow an earlier game.
-				names
-					.entry(executable.clone())
-					.or_insert_with(|| (game.id, game.name.clone()));
+				let found = || (game.id, game.name.clone());
+				names.entry(executable.clone()).or_insert_with(found);
+				if let Some(base) = executable.rsplit('/').next() {
+					basenames.entry(base.into()).or_insert_with(found);
+				}
 			}
 		}
-		Self(names)
+		Self {
+			names,
+			basenames,
+			titles,
+		}
 	}
 	pub fn len(&self) -> usize {
-		self.0.len()
+		self.names.len()
 	}
 	pub fn is_empty(&self) -> bool {
-		self.0.is_empty()
+		self.names.is_empty()
+	}
+	/// The application a manually added game names exactly, when only one carries that title.
+	pub fn find_title(&self, name: &str) -> Option<Id> {
+		self.titles
+			.get(&name.trim().to_lowercase())
+			.copied()
+			.flatten()
 	}
 	/// Match a running executable path. Longer suffixes win, so
 	/// `steamapps/common/game/game.exe` beats a bare `game.exe` from another title.
@@ -263,17 +294,26 @@ impl Index {
 		let suffix = parts.join("/");
 		let mut candidate = suffix.as_str();
 		while !candidate.is_empty() {
-			if let Some(found) = self.0.get(candidate) {
+			if let Some(found) = self.names.get(candidate) {
 				return Some(found.clone());
 			}
 			candidate = candidate.split_once('/').map_or("", |(_, rest)| rest);
 		}
 		// macOS entries name the bundle, which sits above the executable inside it.
-		parts
+		if let Some(found) = parts
 			.iter()
 			.rev()
 			.filter(|part| part.ends_with(".app"))
-			.find_map(|part| self.0.get(*part).cloned())
+			.find_map(|part| self.names.get(*part).cloned())
+		{
+			return Some(found);
+		}
+		// Windows `tasklist` supplies only the image name, while the list often
+		// stores `win64/cs2.exe`. Match the basename after full suffix and bundle
+		// checks so a path-aware match still wins.
+		parts
+			.last()
+			.and_then(|basename| self.basenames.get(*basename).cloned())
 	}
 }
 
@@ -316,6 +356,23 @@ mod tests {
 	}
 
 	#[test]
+	fn bare_windows_image_names_match_nested_detectable_paths() {
+		let games = decode(
+			br#"[{"id":"1158877933042143272","name":"Counter-Strike 2",
+				"executables":[{"name":"win64/cs2.exe","is_launcher":false}]}]"#,
+		)
+		.unwrap();
+		let index = Index::new(&games);
+		assert_eq!(
+			index.find("C:\\Games\\CS2\\cs2.exe").unwrap().1,
+			"Counter-Strike 2"
+		);
+		assert_eq!(index.find("cs2.exe").unwrap().1, "Counter-Strike 2");
+		assert_eq!(index.find("CS2.EXE").unwrap().1, "Counter-Strike 2");
+		assert!(index.find("not-cs2.exe").is_none());
+	}
+
+	#[test]
 	fn list_drops_launchers_and_matches_the_longest_path_suffix() {
 		let games = decode(
 			br#"[
@@ -327,11 +384,14 @@ mod tests {
 			{"id":"9","name":"Launcher only","executables":[{"name":"only.exe","is_launcher":true}]},
 			{"id":"0","name":"Invalid id","executables":[{"name":"zero.exe"}]},
 			{"name":"No id","executables":[{"name":"missing.exe"}]},
-			{"id":"11"}
+			{"id":"11"},
+			{"id":"12","name":"another GAME"}
 		]"#,
 		)
 		.unwrap();
-		assert_eq!(games.len(), 2);
+		// A launcher-only game stays as a title; it never matches a process.
+		assert_eq!(games.len(), 4);
+		assert!(games[2].executables.is_empty());
 		assert_eq!(
 			games[0].executables,
 			["game.exe", "steamapps/common/game/game.exe"]
@@ -345,6 +405,11 @@ mod tests {
 			Some((Id(7), "A game outside the old list".into()))
 		);
 		assert_eq!(index.find("/usr/bin/other"), None);
+		assert_eq!(index.find("only.exe"), None);
+		// Manually added games resolve by exact title, never by a title two applications share.
+		assert_eq!(index.find_title(" launcher ONLY "), Some(Id(9)));
+		assert_eq!(index.find_title("Another game"), None);
+		assert_eq!(index.find_title("Launcher"), None);
 		assert!(index.find("/opt/game.exe").is_some());
 		// A macOS bundle is named by the list but never the process path's last component.
 		let bundles = Index::new(
@@ -364,7 +429,6 @@ mod tests {
 		assert!(decode(b"[]").is_err());
 		assert!(decode(b"{}").is_err());
 		assert!(decode(&vec![b' '; MAX_LIST + 1]).is_err());
-		assert!(decode(br#"[{"id":"7","name":"No executables"}]"#).is_err());
 		assert!(
 			decode(br#"[{"id":"7","name":"Bad\u0007name","executables":[{"name":"a"}]}]"#).is_err()
 		);

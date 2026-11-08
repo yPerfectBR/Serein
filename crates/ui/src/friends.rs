@@ -1911,6 +1911,7 @@ mod tests {
 					&mut state,
 					Event::DirectPresence(vec![client_core::presence::Update {
 						user: Id(1001),
+						avatar: Patch::Absent,
 						status,
 						custom_status: Patch::Null,
 						activities: Patch::Value(vec![model::RichActivity {
@@ -1943,6 +1944,7 @@ mod tests {
 					&mut state,
 					Event::DirectPresence(vec![client_core::presence::Update {
 						user: Id(1001),
+						avatar: Patch::Absent,
 						status,
 						custom_status: Patch::Absent,
 						activities: Patch::Absent,
@@ -1995,6 +1997,7 @@ mod tests {
 				.enumerate()
 				.map(|(index, (user, _))| client_core::presence::Update {
 					user: user.id,
+					avatar: Patch::Absent,
 					status: Patch::Value(if index < 7 { "online" } else { "offline" }.into()),
 					custom_status: Patch::Null,
 					activities: Patch::Null,

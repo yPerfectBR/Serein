@@ -156,7 +156,11 @@ mod tests {
 			(
 				std::time::Instant::now(),
 				Some(Ok(model::InvitePreview {
-					guild: model::Id(42),
+					guild: Some(model::Id(42)),
+					about: None,
+					guild_icon: None,
+					voice_channel: None,
+					channel: None,
 					embed: model::Embed {
 						title: Some(
 							"A synthetic server with a very long name for narrow windows".into(),

@@ -40,7 +40,11 @@ pub struct TimelineView {
 	/// A private command response the reader dismissed this frame.
 	pub(super) dismiss_ephemeral: Option<Id>,
 	pub(super) extension_actions: std::sync::Arc<Vec<crate::extensions_ui::MenuAction>>,
-	pub(super) extension_request: Option<(crate::extensions_ui::MenuAction, String)>,
+	pub(super) extension_request: Option<(
+		crate::extensions_ui::MenuAction,
+		String,
+		crate::extensions_ui::MessageTarget,
+	)>,
 	pub(super) user_action: Option<crate::user_menu::Action>,
 	pub(super) restore_pending: Option<String>,
 	/// A failed own row the reader dismissed this frame.
@@ -103,6 +107,8 @@ pub struct TimelineView {
 	pub(super) pin_request: Option<(Id, Id, bool)>,
 	/// Requested new thread: parent channel and the message that starts it.
 	pub(super) thread_request: Option<(Id, Id)>,
+	/// Starter message of the first visible thread card whose latest message is unknown.
+	pub(super) thread_preview_request: Option<Id>,
 	/// Channel whose Threads dialog a system row asked to open.
 	pub(super) threads_request: Option<Id>,
 	/// The starter message shown as a pseudo-row at the top of an exhausted thread.
@@ -334,6 +340,7 @@ fn layout_key(message: &Message) -> u64 {
 	message.author.kind.hash(&mut key);
 	message.author.webhook.hash(&mut key);
 	message.edited.hash(&mut key);
+	(message.flags & (1 << 12) != 0).hash(&mut key);
 	message.reply_to.hash(&mut key);
 	if let Some(interaction) = &message.interaction {
 		interaction.user.id.hash(&mut key);
@@ -409,7 +416,7 @@ const GROUPED_ROW_SAVINGS: f32 = 52.0;
 
 /// Space above a new message group: cozy by default, tighter when compact spacing is on.
 pub(crate) fn group_gap(compact_messages: bool) -> i8 {
-	if compact_messages { 4 } else { 10 }
+	if compact_messages { 4 } else { 16 }
 }
 
 fn reserved_chrome(ui: &egui::Ui, message: &Message, width: f32) -> f32 {
@@ -494,83 +501,323 @@ pub(crate) fn thread_activity(thread: &model::Channel) -> String {
 		],
 	)
 }
-/// Discord-style card under a message that started a thread: name, activity, open affordance.
+/// A thread card's identity and the message it previews.
+struct ThreadCard<'a> {
+	/// The thread's name, once this session knows its channel.
+	name: Option<&'a str>,
+	/// The service's message count for the thread.
+	count: Option<u32>,
+	/// The thread's latest message, once its bounded read landed.
+	last: Option<&'a Message>,
+	/// One safe line of that message, with mentions named and spoilers hidden.
+	text: Option<&'a str>,
+	/// The latest message this session knows of, so the card shows its time before the body.
+	latest: Option<Id>,
+}
+/// "3 messages" for a thread card, phrased like the archive cards.
+fn thread_count(count: u32) -> String {
+	match count {
+		0 => crate::i18n::translate("timeline-thread-activity-no-replies"),
+		1 => crate::i18n::translate("timeline-thread-activity-one-message"),
+		count => crate::i18n::translate_args(
+			"timeline-thread-activity-many-messages",
+			&[("count", &count.to_string())],
+		),
+	}
+}
+/// One safe line of a thread's latest message: mentions by name, hidden spoilers, and what a
+/// message without text carries. `channel` is the channel the card sits in, which resolves the
+/// guild's nicks and roles even when the thread itself is not loaded.
+fn thread_preview_text(
+	ui: &egui::Ui,
+	state: &State,
+	formatted: &mut FormatCache,
+	channel: Id,
+	message: &Message,
+) -> String {
+	if crate::embeds::has_spoilers(message) {
+		return "Spoiler".to_owned();
+	}
+	let text = if message.is_system() {
+		// A service row carries its meaning in the summary, not in the raw content.
+		crate::i18n::message_text(message).into_owned()
+	} else {
+		let mut job = egui::text::LayoutJob::default();
+		let source = crate::mentions::MentionSource { state, channel };
+		let emojis = formatted
+			.get(message.id, &message.content)
+			.append_inline_preview(
+				&mut job,
+				ui,
+				&message.mentions,
+				Some(&source),
+				crate::mentions::known_roles(state, channel),
+				&state.channels,
+			);
+		Formatted::inline_preview_text(&job, &emojis)
+	};
+	let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+	if !text.is_empty() {
+		return text;
+	}
+	if let Some(attachment) = message.attachments.first() {
+		return attachment.filename.clone();
+	}
+	if let Some(embed) = message.embeds.first() {
+		let one_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+		if let Some(title) = embed.title.as_deref() {
+			let title = one_line(title);
+			if !title.is_empty() {
+				return title;
+			}
+		}
+		if let Some(description) = embed.description.as_deref() {
+			let description = one_line(description);
+			if !description.is_empty() {
+				return description;
+			}
+		}
+		if let Some(url) = embed.url.as_deref() {
+			return url.to_owned();
+		}
+	}
+	if let Some(sticker) = message.sticker_items.first() {
+		return sticker.name.clone();
+	}
+	if let Some(poll) = message.poll.as_deref() {
+		return poll
+			.question
+			.split_whitespace()
+			.collect::<Vec<_>>()
+			.join(" ");
+	}
+	String::new()
+}
+/// The rule that ties a starter's avatar to the thread card under its message, as Discord draws
+/// it: down the gutter, around a rounded corner, into the card's left edge.
+fn thread_connector(
+	ui: &egui::Ui,
+	avatar: egui::Rect,
+	card: egui::Rect,
+	colors: &crate::design::Palette,
+) {
+	let x = avatar.center().x;
+	let top = avatar.bottom() + 4.0;
+	let y = card.center().y;
+	if y <= top + 6.0 || card.left() <= x + 6.0 {
+		return;
+	}
+	let stroke = egui::Stroke::new(2.0, colors.muted.gamma_multiply(0.5));
+	ui.painter()
+		.line_segment([egui::pos2(x, top), egui::pos2(x, y - 6.0)], stroke);
+	ui.painter()
+		.add(egui::epaint::QuadraticBezierShape::from_points_stroke(
+			[
+				egui::pos2(x, y - 6.0),
+				egui::pos2(x, y),
+				egui::pos2(x + 6.0, y),
+			],
+			false,
+			egui::Color32::TRANSPARENT,
+			stroke,
+		));
+	ui.painter().line_segment(
+		[egui::pos2(x + 6.0, y), egui::pos2(card.left() - 1.0, y)],
+		stroke,
+	);
+}
+/// Discord-style card under a message that started a thread: the thread's name and message
+/// count, then who spoke last and what they said. The whole card opens the thread; its height
+/// is fixed, so a read that lands later only fills the card instead of moving the rows below it.
 fn thread_card(
 	ui: &mut egui::Ui,
-	thread: &model::Channel,
+	state: &State,
+	avatars: &mut crate::avatars::Avatars,
+	card: ThreadCard<'_>,
 	colors: &crate::design::Palette,
-) -> egui::Response {
-	let width = ui.available_width().min(520.0);
-	let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 56.0), egui::Sense::click());
+) -> (egui::Response, bool) {
+	let width = ui.available_width();
+	let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 64.0), egui::Sense::click());
 	let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-	if ui.is_rect_visible(rect) {
-		let hovered = response.hovered() || response.has_focus();
-		let painter = ui.painter();
-		painter.rect(
-			rect,
-			8.0,
-			if hovered { colors.hover } else { colors.raised },
-			egui::Stroke::new(1.0, colors.border),
-			egui::StrokeKind::Inside,
-		);
+	let visible = ui.is_rect_visible(rect);
+	if visible {
+		let frame = crate::design::interactive_card_frame(ui, &response);
+		ui.painter().add(frame.paint(rect));
+		let left = rect.left() + 48.0;
+		let right = rect.right() - 16.0;
+		let inner = (right - left).max(1.0);
 		let icon = egui::Rect::from_center_size(
 			egui::pos2(rect.left() + 26.0, rect.center().y),
 			egui::Vec2::splat(20.0),
 		);
-		crate::icons::paint(painter, crate::icons::Icon::Thread, icon, colors.muted);
-		let text_left = rect.left() + 48.0;
-		let text_right = rect.right() - 16.0;
-		let open_width = painter
-			.layout_no_wrap(
-				"View thread ›".to_owned(),
-				egui::FontId::proportional(13.0),
-				colors.link,
+		crate::icons::paint(ui.painter(), crate::icons::Icon::Thread, icon, colors.muted);
+		let count = card.count.map(|count| {
+			// An empty thread has no count yet; a chevron would promise a list it cannot open.
+			let (label, color) = if count == 0 {
+				(thread_count(0), colors.muted)
+			} else {
+				(format!("{} ›", thread_count(count)), colors.link)
+			};
+			egui::WidgetText::from(RichText::new(label).size(12.5).color(color)).into_galley(
+				ui,
+				Some(egui::TextWrapMode::Truncate),
+				inner,
+				egui::FontSelection::Default,
 			)
-			.size()
-			.x;
-		painter.text(
-			egui::pos2(text_right, rect.center().y),
-			egui::Align2::RIGHT_CENTER,
-			"View thread ›",
-			egui::FontId::proportional(13.0),
-			colors.link,
-		);
-		let name_width = (text_right - open_width - 12.0 - text_left).max(40.0);
-		let name = egui::WidgetText::from(
-			crate::design::semibold(ui, thread.name.as_str(), 14.5).color(colors.text_strong),
-		)
-		.into_galley(
-			ui,
-			Some(egui::TextWrapMode::Truncate),
-			name_width,
-			egui::FontSelection::Default,
-		);
-		painter.galley(
-			egui::pos2(text_left, rect.top() + 9.0),
-			name,
-			colors.text_strong,
-		);
-		let activity = egui::WidgetText::from(
-			RichText::new(thread_activity(thread))
-				.size(12.5)
-				.color(colors.muted),
-		)
-		.into_galley(
-			ui,
-			Some(egui::TextWrapMode::Truncate),
-			name_width,
-			egui::FontSelection::Default,
-		);
-		painter.galley(
-			egui::pos2(text_left, rect.top() + 30.0),
-			activity,
-			colors.muted,
-		);
+		});
+		let title = card.name.map(|name| {
+			let reserved = count.as_ref().map_or(0.0, |count| count.size().x + 8.0);
+			egui::WidgetText::from(
+				crate::design::semibold(ui, name, 14.5).color(colors.text_strong),
+			)
+			.into_galley(
+				ui,
+				Some(egui::TextWrapMode::Truncate),
+				(inner - reserved).max(40.0),
+				egui::FontSelection::Default,
+			)
+		});
+		let time = card.latest.filter(|id| id.0 != 0).map(|id| {
+			egui::WidgetText::from(
+				RichText::new(crate::local_time::ago(timestamp(id)))
+					.size(12.0)
+					.color(colors.muted),
+			)
+			.into_galley(
+				ui,
+				Some(egui::TextWrapMode::Truncate),
+				inner,
+				egui::FontSelection::Default,
+			)
+		});
+		// The preview line: the author's avatar and name, then the message's first line.
+		let last = card.last.map(|message| {
+			let color = state
+				.message_author_colors(message)
+				.map_or(colors.text_strong, |role| {
+					crate::design::role_name_color(role.primary, colors.chat, colors.text_strong)
+				});
+			let author = egui::WidgetText::from(
+				crate::design::medium(ui, state.message_author_name(message), 12.5).color(color),
+			)
+			.into_galley(
+				ui,
+				Some(egui::TextWrapMode::Truncate),
+				(inner * 0.45).max(40.0),
+				egui::FontSelection::Default,
+			);
+			let text_left = 28.0 + author.size().x + 8.0;
+			let text_width =
+				(inner - text_left - time.as_ref().map_or(0.0, |time| time.size().x) - 12.0)
+					.max(24.0);
+			let text = egui::WidgetText::from(
+				RichText::new(card.text.unwrap_or_default())
+					.size(12.5)
+					.color(colors.muted),
+			)
+			.into_galley(
+				ui,
+				Some(egui::TextWrapMode::Truncate),
+				text_width,
+				egui::FontSelection::Default,
+			);
+			(author, color, text, text_left)
+		});
+		let title_height = title.as_ref().map_or(0.0, |title| title.size().y);
+		let title_y = match (title.as_ref(), last.as_ref()) {
+			(Some(_), Some(_)) => rect.top() + 9.0,
+			(Some(_), None) => rect.center().y - title_height / 2.0,
+			_ => 0.0,
+		};
+		let preview_y = match (title.as_ref(), last.as_ref()) {
+			(Some(_), Some(_)) => rect.top() + 33.0,
+			(None, Some(_)) => rect.center().y - 10.0,
+			_ => 0.0,
+		};
+		if let Some(title) = title {
+			ui.painter()
+				.galley(egui::pos2(left, title_y), title.clone(), colors.text_strong);
+			if let Some(count) = count {
+				ui.painter().galley(
+					egui::pos2(
+						left + title.size().x + 8.0,
+						title_y + (title.size().y - count.size().y) / 2.0,
+					),
+					count.clone(),
+					colors.link,
+				);
+			}
+			// A card whose preview has not landed yet still shows when the thread was last used.
+			if last.is_none()
+				&& let Some(time) = &time
+			{
+				ui.painter().galley(
+					egui::pos2(
+						right - time.size().x,
+						title_y + (title.size().y - time.size().y) / 2.0,
+					),
+					time.clone(),
+					colors.muted,
+				);
+			}
+		}
+		if let (Some(message), Some((author, color, text, text_left))) = (card.last, last) {
+			avatars.paint_user(
+				ui,
+				&message.author,
+				20.0,
+				egui::Rect::from_min_size(egui::pos2(left, preview_y), egui::Vec2::splat(20.0)),
+				state.demo,
+			);
+			let baseline = preview_y + (20.0 - author.size().y) / 2.0;
+			ui.painter()
+				.galley(egui::pos2(left + 28.0, baseline), author.clone(), color);
+			ui.painter().galley(
+				egui::pos2(left + text_left, baseline),
+				text.clone(),
+				colors.muted,
+			);
+			if let Some(time) = time {
+				ui.painter().galley(
+					egui::pos2(
+						right - time.size().x,
+						preview_y + (20.0 - time.size().y) / 2.0,
+					),
+					time.clone(),
+					colors.muted,
+				);
+			}
+		}
 	}
-	response.on_hover_text(crate::i18n::translate_args(
-		"timeline-open-thread",
-		&[("thread", &thread.name)],
-	))
+	let label = card.name.map_or_else(
+		|| crate::i18n::translate("timeline-thread-activity-thread"),
+		str::to_owned,
+	);
+	// The card is painted, so its parts exist only as shapes; name them for screen readers.
+	let mut named = Vec::new();
+	if let Some(name) = card.name {
+		named.push(name.to_owned());
+	}
+	if let Some(count) = card.count {
+		named.push(thread_count(count));
+	}
+	if let (Some(last), Some(text)) = (card.last, card.text) {
+		named.push(format!("{}: {text}", state.message_author_name(last)));
+	}
+	if let Some(latest) = card.latest {
+		named.push(crate::local_time::ago(timestamp(latest)));
+	}
+	let named = named.join(" · ");
+	response.widget_info(|| {
+		egui::WidgetInfo::labeled(egui::Role::Link, ui.is_enabled(), named.clone())
+	});
+	(
+		response.on_hover_text(crate::i18n::translate_args(
+			"timeline-open-thread",
+			&[("thread", &label)],
+		)),
+		visible,
+	)
 }
 /// The message a thread hangs off, shown above its replies like Discord's thread view.
 fn starter_row(
@@ -1044,6 +1291,21 @@ fn queue_missing_channel_reference(
 		*queued = formatted.missing_channel_reference(state, revealed);
 	}
 }
+/// An 18 px reply or command line led by the spine; `horizontal` would take the
+/// theme's taller control height and push the author line down.
+fn reference_row(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+	let colors = crate::design::palette(ui);
+	ui.allocate_ui_with_layout(
+		egui::vec2(ui.available_width(), 18.0),
+		egui::Layout::left_to_right(egui::Align::Center),
+		|ui| {
+			ui.spacing_mut().interact_size.y = 18.0;
+			ui.spacing_mut().item_spacing.x = 6.0;
+			reference_spine(ui, &colors);
+			add_contents(ui);
+		},
+	);
+}
 /// The curved gutter connector shared by reply and command-invocation headers.
 fn reference_spine(ui: &mut egui::Ui, colors: &crate::design::Palette) {
 	let (gutter, _) = ui.allocate_exact_size(egui::vec2(50.0, 18.0), egui::Sense::hover());
@@ -1092,6 +1354,9 @@ fn grouped(previous: Option<&Message>, message: &Message, boundary: Option<Id>) 
 
 pub(crate) fn mentions_viewer(message: &Message, state: &State) -> bool {
 	let viewer = state.user.as_ref().map(|user| user.id);
+	if viewer.is_some_and(|viewer| message.author.id == viewer) {
+		return false;
+	}
 	message.mention_everyone
 		|| viewer.is_some_and(|viewer| message.mentions.iter().any(|mention| mention.id == viewer))
 		|| (viewer.is_some()
@@ -1136,45 +1401,51 @@ fn divider(ui: &mut egui::Ui, label: String, unread: bool, compact: bool) {
 	let colors = crate::design::palette(ui);
 	let color = if unread { colors.danger } else { colors.muted };
 	ui.add_space(if compact { 8.0 } else { 16.0 });
-	ui.horizontal(|ui| {
-		ui.add_space(16.0);
-		let font = egui::FontId::new(12.0, crate::design::semibold_family(ui.ctx()));
-		let text = ui.painter().layout_no_wrap(label.clone(), font, color);
-		let (rect, response) = ui.allocate_exact_size(
-			egui::vec2((ui.available_width() - 16.0).max(0.0), 20.0),
-			crate::select::band_sense(),
-		);
-		response
-			.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), &label));
-		let pos = egui::pos2(
-			rect.center().x - text.size().x / 2.0,
-			rect.center().y - text.size().y / 2.0,
-		);
-		let gap = (rect.width() - text.size().x - 24.0).max(0.0) / 2.0;
-		for (a, b) in [
-			(rect.left(), rect.left() + gap),
-			(rect.right() - gap, rect.right()),
-		] {
-			ui.painter().line_segment(
-				[
-					egui::pos2(a, rect.center().y),
-					egui::pos2(b, rect.center().y),
-				],
-				egui::Stroke::new(1.0, if unread { color } else { colors.border }),
+	// `horizontal` would take the theme's taller control height.
+	ui.allocate_ui_with_layout(
+		egui::vec2(ui.available_width(), 20.0),
+		egui::Layout::left_to_right(egui::Align::Center),
+		|ui| {
+			ui.add_space(16.0);
+			let font = egui::FontId::new(12.0, crate::design::semibold_family(ui.ctx()));
+			let text = ui.painter().layout_no_wrap(label.clone(), font, color);
+			let (rect, response) = ui.allocate_exact_size(
+				egui::vec2((ui.available_width() - 16.0).max(0.0), 20.0),
+				crate::select::band_sense(),
 			);
-		}
-		egui::text_selection::LabelSelectionState::label_text_selection(
-			ui,
-			&response,
-			pos,
-			text,
-			color,
-			egui::Stroke::NONE,
-		);
-		if response.hovered() {
-			ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
-		}
-	});
+			response.widget_info(|| {
+				egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), &label)
+			});
+			let pos = egui::pos2(
+				rect.center().x - text.size().x / 2.0,
+				rect.center().y - text.size().y / 2.0,
+			);
+			let gap = (rect.width() - text.size().x - 24.0).max(0.0) / 2.0;
+			for (a, b) in [
+				(rect.left(), rect.left() + gap),
+				(rect.right() - gap, rect.right()),
+			] {
+				ui.painter().line_segment(
+					[
+						egui::pos2(a, rect.center().y),
+						egui::pos2(b, rect.center().y),
+					],
+					egui::Stroke::new(1.0, if unread { color } else { colors.border }),
+				);
+			}
+			egui::text_selection::LabelSelectionState::label_text_selection(
+				ui,
+				&response,
+				pos,
+				text,
+				color,
+				egui::Stroke::NONE,
+			);
+			if response.hovered() {
+				ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+			}
+		},
+	);
 	ui.add_space(if compact { 2.0 } else { 4.0 });
 }
 /// A hover-bar reaction: its emoji, whether the reader already reacted, and whether it toggles now.
@@ -1377,6 +1648,8 @@ fn deleted_message_actions(popup: egui::Popup<'_>, action: &mut Option<DeletedLo
 		}
 	});
 }
+/// Fills a message's action menu, including plugin message actions, and records the chosen
+/// plugin action with the message it applies to.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn message_actions(
 	popup: egui::Popup<'_>,
@@ -1384,7 +1657,11 @@ fn message_actions(
 		&Message,
 		Option<&str>,
 		&[crate::extensions_ui::MenuAction],
-		&mut Option<(crate::extensions_ui::MenuAction, String)>,
+		&mut Option<(
+			crate::extensions_ui::MenuAction,
+			String,
+			crate::extensions_ui::MessageTarget,
+		)>,
 	),
 	actions: (bool, bool, bool, bool),
 	selection: (
@@ -1415,8 +1692,15 @@ fn message_actions(
 				|ui| {
 					for action in extension_actions {
 						if ui.button(&action.label).clicked() {
-							*extension_request =
-								Some((action.clone(), message.display_text().into_owned()));
+							*extension_request = Some((
+								action.clone(),
+								message.display_text().into_owned(),
+								crate::extensions_ui::MessageTarget {
+									channel: message.channel,
+									message: message.id,
+									author: message.author.id,
+								},
+							));
 							ui.close();
 						}
 					}
@@ -2819,9 +3103,18 @@ impl TimelineView {
 							self.compact_messages,
 						);
 					}
-					if self.unread_boundary == Some(id) {
+					let unread_boundary = self.unread_boundary == Some(id);
+					if unread_boundary {
 						divider(ui, "New messages".into(), true, self.compact_messages);
 					}
+					// Like Discord, the gap above a group sits outside the row highlight;
+					// a divider already separates the group.
+					let group_lift = if compact || new_day || unread_boundary {
+						0
+					} else {
+						group_gap(false) - 2
+					};
+					ui.add_space(f32::from(group_lift));
 					let colors = crate::design::palette(ui);
 					let background = ui.painter().add(egui::Shape::Noop);
 					let mut time_rect = None;
@@ -2838,7 +3131,7 @@ impl TimelineView {
 							} else if compact {
 								1
 							} else {
-								group_gap(self.compact_messages)
+								2
 							},
 							bottom: 1,
 						})
@@ -2851,10 +3144,7 @@ impl TimelineView {
 								.as_deref()
 								.filter(|_| message.reply_to.is_none())
 							{
-								ui.horizontal(|ui| {
-									ui.spacing_mut().interact_size.y = 18.0;
-									ui.spacing_mut().item_spacing.x = 6.0;
-									reference_spine(ui, &colors);
+								reference_row(ui, |ui| {
 									let avatar =
 										avatars.show(ui, &interaction.user, 16.0, state.demo);
 									surface.keep(&avatar);
@@ -2907,10 +3197,7 @@ impl TimelineView {
 							}
 							// A poll result's reference opens through its result card instead.
 							if let Some(reply) = message.reply_to.filter(|_| message.kind != 46) {
-								ui.horizontal(|ui| {
-									ui.spacing_mut().interact_size.y = 18.0;
-									ui.spacing_mut().item_spacing.x = 6.0;
-									reference_spine(ui, &colors);
+								reference_row(ui, |ui| {
 									// Reuse only loaded content; never fetch a thread while painting.
 									if message.reply_deleted || state.timeline.is_deleted(reply) {
 										let deleted = ui.add(
@@ -3139,6 +3426,9 @@ impl TimelineView {
 							let mut body_bottom = f32::NAN;
 							// Hovering the avatar underlines the author, like hovering the name.
 							let mut avatar_hot = false;
+							// The starter's avatar and its thread card, joined by a gutter rule.
+							let mut thread_gutter = None;
+							let mut thread_card_rect = None;
 							ui.horizontal_top(|ui| {
 								if system.is_some() {
 									let (gutter, _) = ui.allocate_exact_size(
@@ -3161,11 +3451,28 @@ impl TimelineView {
 									let body_spacing = ui.spacing().item_spacing.x;
 									ui.spacing_mut().item_spacing.x = 8.0;
 									let time = timestamp(id);
+									// The time column is as wide as the widest clock, so authors
+									// line up whatever the minutes are.
+									let column = crate::local_time::widest_clocks()
+										.into_iter()
+										.map(|clock| {
+											ui.painter()
+												.layout_no_wrap(
+													clock.to_owned(),
+													egui::FontId::proportional(12.0),
+													colors.muted,
+												)
+												.size()
+												.x
+										})
+										.fold(0.0, f32::max)
+										.ceil();
 									compact_header(
 										ui,
 										ui.available_width(),
 										egui::FontId::proportional(12.0),
 										|ui| {
+											ui.set_min_width(column);
 											let time = ui
 												.label(
 													RichText::new(crate::local_time::clock(time))
@@ -3244,6 +3551,7 @@ impl TimelineView {
 										.show(ui, &message.author, 40.0, state.demo)
 										.on_hover_cursor(egui::CursorIcon::PointingHand);
 									avatar_hot = avatar.hovered();
+									thread_gutter = Some(avatar.rect);
 									crate::user_menu::show(
 										&avatar,
 										state,
@@ -3343,6 +3651,10 @@ impl TimelineView {
 												&mut self.threads_request,
 											),
 										);
+									}
+									// Retained wire flags also cover cached history; notification targeting stays session-only.
+									if message.flags & (1 << 12) != 0 {
+										crate::timestamp_picker::silent_indicator(ui);
 									}
 									let body = egui::Frame::NONE
 										.inner_margin(egui::Margin {
@@ -3743,12 +4055,76 @@ impl TimelineView {
 									}
 									// A "started a thread" row already links the thread inline.
 									if system.is_none()
-										&& let Some(thread) = state.thread_of(message)
+										&& let Some(thread) = state
+											.thread_of(message)
+											.map(|thread| thread.id)
+											.or_else(|| state.unloaded_thread(message))
 									{
-										let card = thread_card(ui, thread, &colors);
+										// The name and count come from the thread's channel; its
+										// latest message only exists once the bounded read lands.
+										let channel = state.channel(thread);
+										let preview = state.thread_preview(thread);
+										let name = channel
+											.map(|channel| channel.name.as_str())
+											.or_else(|| {
+												preview.as_ref().and_then(|preview| {
+													preview
+														.channel
+														.map(|channel| channel.name.as_str())
+												})
+											});
+										let count = channel
+											.and_then(|channel| channel.message_count)
+											.or_else(|| {
+												preview.as_ref().and_then(|preview| {
+													preview
+														.channel
+														.and_then(|channel| channel.message_count)
+												})
+											});
+										let last =
+											preview.as_ref().and_then(|preview| preview.last);
+										let text = last.map(|reply| {
+											thread_preview_text(
+												ui,
+												state,
+												&mut self.formatted,
+												message.channel,
+												reply,
+											)
+										});
+										let latest = last
+											.map(|message| message.id)
+											.or_else(|| {
+												channel.and_then(|channel| channel.last_message)
+											})
+											.or_else(|| {
+												preview.as_ref().and_then(|preview| {
+													preview
+														.channel
+														.and_then(|channel| channel.last_message)
+												})
+											});
+										let (card, visible) = thread_card(
+											ui,
+											state,
+											avatars,
+											ThreadCard {
+												name,
+												count,
+												last,
+												text: text.as_deref(),
+												latest,
+											},
+											&colors,
+										);
 										surface.keep(&card);
 										if card.clicked() {
-											self.channel_reference = Some(thread.id);
+											self.channel_reference = Some(thread);
+										}
+										thread_card_rect = Some(card.rect);
+										if visible && state.thread_preview_needs_read(thread) {
+											self.thread_preview_request.get_or_insert(message.id);
 										}
 									}
 									let reactions_top = ui.cursor().top();
@@ -3792,6 +4168,10 @@ impl TimelineView {
 									fill_header_line(ui, compact, text_line);
 								});
 							});
+							// Discord ties the starter's avatar to the thread card under it.
+							if let (Some(avatar), Some(card)) = (thread_gutter, thread_card_rect) {
+								thread_connector(ui, avatar, card, &colors);
+							}
 							let mut cover = ui.min_rect();
 							if body_bottom.is_finite() {
 								cover.max.y = body_bottom;
@@ -3809,6 +4189,9 @@ impl TimelineView {
 							surface.finish(ui);
 						});
 					let rect = row.response.rect;
+					// A group start's toolbar rises into the gap above it but stops short of the
+					// previous message, as in Discord.
+					let toolbar_top = rect.top() - if compact { 10.0 } else { 12.0 };
 					if let Some(pos) = double_click
 						&& let Some(text) = self.double_click_reaction
 						&& !deleted && rect.contains(pos)
@@ -3935,7 +4318,7 @@ impl TimelineView {
 							.is_some_and(|u| u.id == message.author.id);
 						if deleted {
 							let toolbar_rect = egui::Rect::from_min_size(
-								egui::pos2(rect.right() - 46.0, rect.top() - 10.0),
+								egui::pos2(rect.right() - 46.0, toolbar_top),
 								egui::vec2(36.0, 28.0),
 							);
 							let mut toolbar = ui.new_child(
@@ -4022,7 +4405,7 @@ impl TimelineView {
 							let toolbar_rect = egui::Rect::from_min_size(
 								egui::pos2(
 									(rect.right() - 16.0 - width).max(rect.left()),
-									rect.top() - 10.0,
+									toolbar_top,
 								),
 								egui::vec2(width, 28.0),
 							);
@@ -4973,6 +5356,15 @@ mod pending_tests;
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Text actually painted this frame, in painting order.
+	fn painted_labels(shape: &egui::Shape, out: &mut Vec<String>) {
+		match shape {
+			egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
+			egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| painted_labels(s, out)),
+			_ => {}
+		}
+	}
 
 	#[test]
 	fn short_history_loads_older_only_after_explicit_upward_input() {
@@ -6084,6 +6476,26 @@ mod tests {
 			assert!(visible.contains("secret one") && !visible.contains("secret two"));
 			assert_eq!(view.revealed[&message.id].text, 1);
 			assert!(!view.revealed[&message.id].media);
+			// Notification metadata changes must not conceal already revealed content.
+			message.flags |= 1 << 12;
+			message.suppress_notifications = true;
+			state.timeline.insert(message.clone(), true, false).unwrap();
+			state.revision += 1;
+			let labels = render(&mut view, &mut state, vec![]);
+			assert!(labels.iter().any(|(text, _)| text.contains("secret one")));
+			assert_eq!(view.revealed[&message.id].text, 1);
+			// Cached history keeps the wire flag but omits session notification targeting.
+			message.suppress_notifications = false;
+			state.timeline.insert(message.clone(), true, false).unwrap();
+			state.revision += 1;
+			let labels = render(&mut view, &mut state, vec![]);
+			assert!(
+				labels
+					.iter()
+					.any(|(text, _)| text == &crate::i18n::translate("message-silent-indicator"))
+			);
+			assert!(labels.iter().any(|(text, _)| text.contains("secret one")));
+			assert_eq!(view.revealed[&message.id].text, 1);
 			// Like Discord, there is no re-hide control; start the next case concealed.
 			view.revealed.clear();
 			render(&mut view, &mut state, vec![]);
@@ -6229,13 +6641,6 @@ mod tests {
 	}
 	#[test]
 	fn thread_starter_renders_above_replies_once_history_is_exhausted() {
-		fn text(shape: &egui::Shape, out: &mut Vec<String>) {
-			match shape {
-				egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
-				egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| text(s, out)),
-				_ => {}
-			}
-		}
 		let ctx = egui::Context::default();
 		crate::design::apply(&ctx);
 		let mut state = test_support::chat_demo_state();
@@ -6307,7 +6712,7 @@ mod tests {
 				},
 			);
 			for shape in &output.shapes {
-				text(&shape.shape, &mut painted);
+				painted_labels(&shape.shape, &mut painted);
 			}
 			output.drop_without_applying_deltas();
 		}
@@ -6329,6 +6734,267 @@ mod tests {
 				"missing {label}: {painted:?}"
 			);
 		}
+	}
+	#[test]
+	fn an_unloaded_thread_starter_offers_its_thread_card() {
+		let ctx = egui::Context::default();
+		crate::design::apply(&ctx);
+		ctx.enable_accesskit();
+		let mut state = test_support::chat_demo_state();
+		state
+			.permissions
+			.replace(test_support::permission_snapshot(&state))
+			.unwrap();
+		let parent = state
+			.channels
+			.iter()
+			.find(|c| c.id == Id(20))
+			.map(|c| c.id)
+			.expect("fixture text channel");
+		state.select(parent);
+		state.timeline.clear();
+		// The service flags one message as a thread's starter, but the session never loaded
+		// that thread (a private thread the account can view without being a member).
+		let thread = Id(1_700_000_000_000_000_000);
+		assert!(state.channel(thread).is_none());
+		let mut starter = test_support::message(thread.0, parent);
+		starter.flags = model::HAS_THREAD;
+		starter.content = "The private thread starter".into();
+		let starter_id = starter.id;
+		let ordinary = test_support::message(thread.0 + 1, parent);
+		for message in [starter, ordinary] {
+			state.timeline.insert(message, false, false).unwrap();
+		}
+		state.history_pending = false;
+		state.freshness = model::Freshness::Fresh;
+		state.older_exhausted = true;
+		let mut view = TimelineView::default();
+		let mut avatars = crate::avatars::Avatars::default();
+		let mut painted = vec![];
+		for _ in 0..4 {
+			painted.clear();
+			let output = ctx.run_ui(
+				egui::RawInput {
+					screen_rect: Some(egui::Rect::from_min_size(
+						egui::Pos2::ZERO,
+						egui::vec2(900.0, 1400.0),
+					)),
+					..Default::default()
+				},
+				|ui| {
+					view.show(
+						ui,
+						&mut state,
+						&mut None,
+						&mut None,
+						(
+							&mut avatars,
+							&mut crate::profiles::ProfileSession::default(),
+						),
+						None,
+					);
+				},
+			);
+			for shape in &output.shapes {
+				painted_labels(&shape.shape, &mut painted);
+			}
+			output.drop_without_applying_deltas();
+		}
+		// Only the flagged starter offers its thread, and the card is its own click target: the
+		// "View thread" button and the generic "Thread" label are both gone.
+		assert_eq!(view.thread_preview_request, Some(starter_id));
+		assert!(
+			!painted.iter().any(|text| text == "View thread ›"),
+			"the card itself opens the thread: {painted:?}"
+		);
+		assert!(
+			!painted.iter().any(|text| text == "Thread"),
+			"an unknown thread name is left out instead of invented: {painted:?}"
+		);
+
+		// The bounded read fills the card: the thread's name and count, then its last author,
+		// reply and relative time.
+		let mut reply = test_support::message(thread.0 + 2, thread);
+		reply.content = "The latest reply in this thread".into();
+		let client_core::Command::ThreadPreview {
+			thread: requested,
+			request,
+			..
+		} = state
+			.request_thread_preview(starter_id)
+			.expect("the visible card admits one preview read")
+		else {
+			panic!("ThreadPreview")
+		};
+		assert_eq!(requested, thread);
+		state.apply(client_core::Envelope {
+			generation: state.generation,
+			event: client_core::Event::ThreadPreview {
+				thread,
+				request,
+				result: Ok(client_core::thread_previews::Loaded {
+					channel: Some(model::Channel {
+						id: thread,
+						guild: Some(Id(10)),
+						parent_id: Some(parent),
+						kind: 12,
+						position: 0,
+						name: "Synthetic private thread".into(),
+						recipients: vec![],
+						last_message: Some(reply.id),
+						member_list_id: None,
+						tags: None,
+						message_count: Some(3),
+						icon: None,
+					}),
+					last: Some(reply),
+				}),
+			},
+		});
+		view.thread_preview_request = None;
+		painted.clear();
+		let mut accessible = Vec::new();
+		for _ in 0..2 {
+			let output = ctx.run_ui(
+				egui::RawInput {
+					screen_rect: Some(egui::Rect::from_min_size(
+						egui::Pos2::ZERO,
+						egui::vec2(900.0, 1400.0),
+					)),
+					..Default::default()
+				},
+				|ui| {
+					view.show(
+						ui,
+						&mut state,
+						&mut None,
+						&mut None,
+						(
+							&mut avatars,
+							&mut crate::profiles::ProfileSession::default(),
+						),
+						None,
+					);
+				},
+			);
+			for shape in &output.shapes {
+				painted_labels(&shape.shape, &mut painted);
+			}
+			if let Some(update) = output.platform_output.accesskit_update.as_ref() {
+				accessible.extend(
+					update
+						.nodes
+						.iter()
+						.filter_map(|(_, node)| node.label().map(str::to_owned)),
+				);
+			}
+			output.drop_without_applying_deltas();
+		}
+		let count = format!("{} ›", thread_count(3));
+		for label in [
+			"Synthetic private thread",
+			count.as_str(),
+			"You (synthetic)",
+			"The latest reply in this thread",
+		] {
+			assert!(
+				painted.iter().any(|text| text == label),
+				"missing {label}: {painted:?}"
+			);
+		}
+		// Painted text has no accessible node of its own, so the card names every part.
+		assert!(
+			accessible.iter().any(|label| {
+				label.contains("Synthetic private thread")
+					&& label.contains(&thread_count(3))
+					&& label.contains("You (synthetic): The latest reply in this thread")
+			}),
+			"the card names its name, count, author and preview: {accessible:?}"
+		);
+		assert!(
+			view.thread_preview_request.is_none(),
+			"a trusted preview is not read again: {painted:?}"
+		);
+	}
+	#[test]
+	fn a_thread_preview_names_mentions_hides_spoilers_and_falls_back_to_what_a_message_carries() {
+		let ctx = egui::Context::default();
+		crate::design::apply(&ctx);
+		let state = test_support::demo_state();
+		let mut formatted = FormatCache::default();
+		let mut message = text_message(7);
+		message.content = "  first line\nsecond line  ".into();
+		let text = |message: &Message, formatted: &mut FormatCache| {
+			let mut text = None;
+			let output = ctx.run_ui(
+				egui::RawInput {
+					screen_rect: Some(egui::Rect::from_min_size(
+						egui::Pos2::ZERO,
+						egui::vec2(800.0, 600.0),
+					)),
+					..Default::default()
+				},
+				|ui| {
+					text = Some(thread_preview_text(ui, &state, formatted, Id(20), message));
+				},
+			);
+			output.drop_without_applying_deltas();
+			text.unwrap()
+		};
+		assert_eq!(text(&message, &mut formatted), "first line second line");
+
+		// A service row uses its summary, so its card is not blank.
+		message.kind = 18;
+		message.content = "Synthetic thread".into();
+		let preview = text(&message, &mut formatted);
+		assert!(preview.contains("started a thread"), "{preview}");
+		message.kind = 0;
+
+		// A mention names its author instead of the raw token.
+		message.content = "Hi <@9>".into();
+		message.mentions = vec![model::User {
+			id: Id(9),
+			name: "Synthetic".into(),
+			avatar: None,
+			webhook: false,
+			kind: Default::default(),
+			discriminator: 0,
+			primary_guild: None,
+			cosmetics: None,
+		}];
+		let preview = text(&message, &mut formatted);
+		assert!(
+			preview.contains("Synthetic") && !preview.contains('<'),
+			"{preview}"
+		);
+
+		// A card cannot reveal a spoiler, so it only says there is one.
+		message.content = "A ||private ending|| Z".into();
+		message.mentions.clear();
+		assert_eq!(text(&message, &mut formatted), "Spoiler");
+
+		// The concealment can live in an embed instead of the message text.
+		message.content.clear();
+		message.embeds = vec![model::Embed {
+			title: Some("||the ending||".into()),
+			..Default::default()
+		}];
+		assert_eq!(text(&message, &mut formatted), "Spoiler");
+		message.embeds.clear();
+
+		message.content.clear();
+		message.attachments = vec![model::Attachment {
+			id: Id(8),
+			filename: "synthetic.png".into(),
+			description: None,
+			content_type: None,
+			size: 1,
+			media: Default::default(),
+			spoiler: false,
+			duration_ms: None,
+			waveform: vec![],
+		}];
+		assert_eq!(text(&message, &mut formatted), "synthetic.png");
 	}
 	#[test]
 	fn grouping_respects_dates_replies_unread_and_five_minute_gaps() {
@@ -9100,9 +9766,8 @@ mod tests {
 			.insert(message.id, Revealed::new(&message, u32::MAX, true));
 		view.viewing = Some((message.id, Id(7)));
 		render(&mut view, &mut state, &mut images); // Modal sizing pass precedes visible paint.
-		let shown = render(&mut view, &mut state, &mut images);
-		assert!(shown.contains("SPOILER_hidden.png"));
-		assert!(shown.contains("Open in browser"));
+		render(&mut view, &mut state, &mut images);
+		assert!(view.viewing.is_some());
 		let requests = images.take_requests();
 		assert!(!requests.is_empty() && requests.iter().all(|key| key.starts_with("media:")));
 		assert!(requests.iter().any(|key| key.contains(":320x120:")));

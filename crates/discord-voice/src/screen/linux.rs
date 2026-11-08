@@ -89,6 +89,7 @@ pub(super) fn run(
 	preview: Arc<Mutex<Option<image::RgbaImage>>>,
 	status: Arc<Mutex<&'static str>>,
 	preview_visible: Arc<AtomicBool>,
+	captured: Arc<AtomicBool>,
 	wake: &impl Fn(),
 ) -> Result<(), &'static str> {
 	let direct = settings.source == SourceId::X11Desktop && x11_session();
@@ -123,6 +124,7 @@ pub(super) fn run(
 				.transpose()?;
 			let mut mode_index = 0;
 			let modes = Mode::order();
+			let mut noted_capture = false;
 			while let Some(&mode) = modes.get(mode_index) {
 				mode_index += 1;
 				note("encoder_try", mode.label());
@@ -255,6 +257,10 @@ pub(super) fn run(
 					}
 					if let Some(sample) = pipeline.preview.try_pull_sample(gst::ClockTime::ZERO) {
 						let image = preview_frame(&capture::raw(&sample)?)?;
+						if !noted_capture {
+							noted_capture = true;
+							captured.store(true, Ordering::Release);
+						}
 						if let Ok(mut slot) = preview.try_lock() {
 							*slot = Some(image);
 						}
@@ -295,6 +301,10 @@ pub(super) fn run(
 								pipeline.frames.try_pull_sample(gst::ClockTime::ZERO)
 						{
 							pulled = true;
+							if !noted_capture {
+								noted_capture = true;
+								captured.store(true, Ordering::Release);
+							}
 							let pull = metrics.start();
 							metrics.finish(crate::diagnostics::Stage::Receive, pull);
 							let (data, is_keyframe) = if mode == Mode::Software {
