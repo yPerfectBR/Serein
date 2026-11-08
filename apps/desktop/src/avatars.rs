@@ -1243,8 +1243,10 @@ async fn run(
 		.then(|| {
 			net_route::apply(reqwest::Client::builder().https_only(true).no_proxy())
 				.redirect(reqwest::redirect::Policy::none())
-				.timeout(Duration::from_secs(15))
-				.connect_timeout(Duration::from_secs(5))
+				// Originals and clips crossing a high-latency tunnel need room for their body;
+				// the connect timeout also covers DNS and the TLS handshake.
+				.timeout(Duration::from_secs(45))
+				.connect_timeout(Duration::from_secs(10))
 				// Keep one warm connection per concurrent job so bursts skip new TLS handshakes.
 				.pool_max_idle_per_host(JOBS)
 				.build()
@@ -1699,7 +1701,24 @@ async fn download(
 	if Instant::now() < *cooldown {
 		return None;
 	}
-	let mut response = client.get(url).send().await.ok()?;
+	let mut response = match client.get(url).send().await {
+		Ok(response) => response,
+		// One retry covers a handshake dropped by a lossy link; other errors are final.
+		Err(error) if error.is_connect() || error.is_timeout() => {
+			media_log(url, &error);
+			match client.get(url).send().await {
+				Ok(response) => response,
+				Err(error) => {
+					media_log(url, &error);
+					return None;
+				}
+			}
+		}
+		Err(error) => {
+			media_log(url, &error);
+			return None;
+		}
+	};
 	if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
 		let seconds = response
 			.headers()
@@ -1708,28 +1727,43 @@ async fn download(
 			.and_then(|value| value.parse::<f64>().ok())
 			.filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
 			.unwrap_or(60.0);
+		media_log(url, format_args!("429, pausing media for {seconds}s"));
 		// A nonsensical delay suspends this session's CDN requests, rather than retrying early.
 		*cooldown = Instant::now()
 			.checked_add(Duration::try_from_secs_f64(seconds.max(1.0)).unwrap_or(Duration::MAX))
 			.unwrap_or_else(|| Instant::now() + Duration::from_secs(100 * 365 * 24 * 60 * 60));
 		return None;
 	}
-	if !response.status().is_success()
-		|| response
-			.content_length()
-			.is_some_and(|length| length > limit as u64)
+	if !response.status().is_success() {
+		media_log(url, response.status());
+		return None;
+	}
+	if response
+		.content_length()
+		.is_some_and(|length| length > limit as u64)
 	{
 		return None;
 	}
 	let mut bytes =
 		Vec::with_capacity(response.content_length().unwrap_or(4096).min(limit as u64) as usize);
-	while let Some(chunk) = response.chunk().await.ok()? {
+	while let Some(chunk) = response
+		.chunk()
+		.await
+		.inspect_err(|error| media_log(url, error))
+		.ok()?
+	{
 		if bytes.len().checked_add(chunk.len())? > limit {
 			return None;
 		}
 		bytes.extend_from_slice(&chunk);
 	}
 	Some(bytes)
+}
+
+/// Media failures are otherwise silent; the query (signed URL parameters) is never logged.
+pub(crate) fn media_log(url: &str, what: impl std::fmt::Display) {
+	let path = url.split(['?', '#']).next().unwrap_or(url);
+	eprintln!("[Serein media] {path}: {what}");
 }
 
 fn decode(bytes: &[u8], budget: &Budget) -> Option<egui::ColorImage> {

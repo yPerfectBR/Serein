@@ -37,7 +37,8 @@ pub(super) fn source(
 			.no_deflate()
 			.no_zstd()
 			.redirect(reqwest::redirect::Policy::none())
-			.timeout(Duration::from_secs(15))
+			.timeout(Duration::from_secs(30))
+			.connect_timeout(Duration::from_secs(10))
 			.build()
 			.map_err(|_| INVALID)?;
 		(
@@ -88,6 +89,11 @@ struct Source {
 fn invalid() -> io::Error {
 	io::Error::new(io::ErrorKind::InvalidData, INVALID)
 }
+/// A network failure worth one retry, unlike a malformed or refused response.
+fn transient(url: &url::Url, error: &reqwest::Error) -> io::Error {
+	crate::avatars::media_log(url.as_str(), error);
+	io::Error::new(io::ErrorKind::TimedOut, INVALID)
+}
 impl Source {
 	fn check_cancelled(&self) -> io::Result<()> {
 		if self.cancelled.load(Ordering::Acquire) {
@@ -124,14 +130,14 @@ impl Source {
 					tokio::time::sleep(Duration::from_millis(20)).await;
 				}
 			};
-			let transfer = async {
+			let fetch = || async {
 				let mut response = client
 					.get(url.clone())
 					.header(reqwest::header::ACCEPT_ENCODING, "identity")
 					.header(reqwest::header::RANGE, format!("bytes={start}-{end}"))
 					.send()
 					.await
-					.map_err(|_| invalid())?;
+					.map_err(|error| transient(url, &error))?;
 				if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
 					let range = format!("bytes {start}-{end}/{}", self.len);
 					if response
@@ -145,6 +151,7 @@ impl Source {
 				} else if !(response.status() == reqwest::StatusCode::OK
 					&& start == 0 && count == self.len)
 				{
+					crate::avatars::media_log(url.as_str(), response.status());
 					return Err(io::Error::new(io::ErrorKind::Unsupported, UNSUPPORTED));
 				}
 				if response
@@ -158,7 +165,11 @@ impl Source {
 					return Err(invalid());
 				}
 				let mut bytes = Vec::with_capacity(count);
-				while let Some(chunk) = response.chunk().await.map_err(|_| invalid())? {
+				while let Some(chunk) = response
+					.chunk()
+					.await
+					.map_err(|error| transient(url, &error))?
+				{
 					if chunk.len() > count - bytes.len() {
 						return Err(invalid());
 					}
@@ -168,6 +179,12 @@ impl Source {
 					return Err(invalid());
 				}
 				Ok(bytes)
+			};
+			let transfer = async {
+				match fetch().await {
+					Err(error) if error.kind() == io::ErrorKind::TimedOut => fetch().await,
+					result => result,
+				}
 			};
 			tokio::select! { biased;
 				_ = cancelled => Err(io::Error::new(io::ErrorKind::ConnectionAborted, "Cancelled")),
