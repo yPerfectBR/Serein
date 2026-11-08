@@ -122,6 +122,7 @@ impl Decoder {
 				.build(),
 		);
 		let decodebin = make("decodebin")?;
+		skip_hardware_decoders(&decodebin);
 		pipeline
 			.add_many([appsrc.upcast_ref::<gst::Element>(), &decodebin])
 			.map_err(|_| UNSUPPORTED)?;
@@ -475,6 +476,26 @@ fn feed(src: &gst_app::AppSrc, shared: &Shared, hint: u32) {
 		.position
 		.store(position + count as u64, Ordering::Release);
 	let _ = src.push_buffer(buffer);
+}
+
+/// Hardware decoders fix GPU memory caps (CUDA, VA, Vulkan) while their pad is still unlinked,
+/// so the system-memory branch then fails with not-negotiated. They would also wake a
+/// suspended discrete GPU for a chat clip; the software decoders handle these sizes.
+fn skip_hardware_decoders(decodebin: &gst::Element) {
+	let Some(results) = gst::glib::Type::from_name("GstAutoplugSelectResult")
+		.and_then(gst::glib::EnumClass::with_type)
+	else {
+		return;
+	};
+	decodebin.connect("autoplug-select", false, move |values| {
+		let hardware = values
+			.get(3)
+			.and_then(|value| value.get::<gst::ElementFactory>().ok())
+			.and_then(|factory| factory.metadata(gst::ELEMENT_METADATA_KLASS).map(str::to_owned))
+			.is_some_and(|klass| klass.split('/').any(|part| part == "Hardware"));
+		// GST_AUTOPLUG_SELECT_TRY = 0, GST_AUTOPLUG_SELECT_SKIP = 2.
+		results.to_value(if hardware { 2 } else { 0 })
+	});
 }
 
 /// Block until the pipeline finished its pending (pre-roll or seek) state change.
