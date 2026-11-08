@@ -123,21 +123,28 @@ READY_HOST = "gateway.discord.gg"
 
 
 def wait_for_tunnel(budget=3.5):
-    """Block until a TCP connection to Discord succeeds through the tunnel (or a 3.5 s budget runs out: the launcher waits at most 5 s for our reply).
+    """Wait (at most `budget` seconds) until a TCP connection to Discord succeeds through the tunnel.
 
     The first packets after the tunnel comes up only start the WireGuard handshake, and a program that starts
-    immediately burns its small, fixed number of sign-in attempts on a path that is not usable yet, which showed
-    up as "Connection failed" on the first launch after the tunnel was created. Probing here (and thereby
-    completing the handshake and warming DNS) costs well under a second once the tunnel is up."""
+    immediately can burn its small, fixed number of sign-in attempts on a path that is not usable yet. The probe runs
+    in a thread because name resolution has no timeout of its own: a slow resolver must never hold the reply past the
+    launcher's 5 s wait (that made launches look failed)."""
+    import threading
     import time
-    deadline = time.monotonic() + budget
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((READY_HOST, 443), timeout=4):
-                return True
-        except OSError:
-            time.sleep(0.5)
-    return False
+    done = threading.Event()
+
+    def probe():
+        deadline = time.monotonic() + budget
+        while time.monotonic() < deadline and not done.is_set():
+            try:
+                with socket.create_connection((READY_HOST, 443), timeout=2):
+                    done.set()
+                    return
+            except OSError:
+                time.sleep(0.3)
+
+    threading.Thread(target=probe, daemon=True).start()
+    return done.wait(budget)
 
 
 def handle(connection, executable):
