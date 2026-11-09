@@ -59,7 +59,7 @@ pub async fn upload(
 	if *cancel.borrow() {
 		return Err(Error::Cancelled);
 	}
-	let client = reqwest::Client::builder()
+	let client = net_route::dns::apply(reqwest::Client::builder())
 		.user_agent(concat!("Serein/", env!("CARGO_PKG_VERSION")))
 		.https_only(true)
 		.no_proxy()
@@ -345,7 +345,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn rejection_redirect_and_response_limits_do_not_return_links() {
-		let client = reqwest::Client::builder()
+		let client = net_route::dns::apply(reqwest::Client::builder())
 			.no_proxy()
 			.redirect(reqwest::redirect::Policy::none())
 			.retry(reqwest::retry::never())
@@ -405,7 +405,7 @@ mod tests {
 			let _ = ready.send(());
 			let _ = socket.read(&mut bytes).await;
 		});
-		let client = reqwest::Client::builder().no_proxy().build().unwrap();
+		let client = net_route::dns::apply(reqwest::Client::builder()).no_proxy().build().unwrap();
 		let (progress, _) = watch::channel(Status::Preparing);
 		let (cancel, mut cancellation) = watch::channel(false);
 		let task = tokio::spawn(async move {
@@ -491,7 +491,7 @@ mod tests {
 		});
 		let (progress, _) = watch::channel(Status::Preparing);
 		let result = transfer(
-			&reqwest::Client::builder().no_proxy().build().unwrap(),
+			&net_route::dns::apply(reqwest::Client::builder()).no_proxy().build().unwrap(),
 			&endpoint,
 			Host::Catbox,
 			source,
@@ -545,7 +545,7 @@ mod tests {
 				.unwrap();
 		});
 		let (progress, _) = watch::channel(Status::Preparing);
-		let client = reqwest::Client::builder()
+		let client = net_route::dns::apply(reqwest::Client::builder())
 			.no_proxy()
 			.redirect(reqwest::redirect::Policy::none())
 			.build()

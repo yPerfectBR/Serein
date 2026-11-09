@@ -71,7 +71,7 @@ pub(super) fn source(
 		}
 		Raw {
 			input: Input::Http {
-				client: reqwest::Client::builder()
+				client: net_route::dns::apply(reqwest::Client::builder())
 					.no_proxy()
 					.redirect(reqwest::redirect::Policy::none())
 					.timeout(Duration::from_secs(15))

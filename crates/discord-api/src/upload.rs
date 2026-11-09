@@ -468,7 +468,7 @@ impl DiscordApi {
 		let client = self
 			.upload_client
 			.get_or_try_init(|| async {
-				crate::browser_transport(reqwest::Client::builder())
+				crate::browser_transport(net_route::dns::apply(reqwest::Client::builder()))
 					.redirect(reqwest::redirect::Policy::none())
 					.retry(reqwest::retry::never())
 					.no_proxy()

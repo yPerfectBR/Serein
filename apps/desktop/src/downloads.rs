@@ -188,7 +188,7 @@ impl Downloads {
 					let Some(path) = path else {
 						return Err("Cancelled");
 					};
-					let client = reqwest::Client::builder()
+					let client = net_route::dns::apply(reqwest::Client::builder())
 						.no_proxy()
 						.redirect(reqwest::redirect::Policy::none())
 						.connect_timeout(Duration::from_secs(15))
@@ -856,7 +856,7 @@ mod tests {
 	async fn embedded_image_download_requires_bounded_png_length() {
 		let failed = Arc::new(AtomicBool::new(false));
 		let file = CopyFile::create("image.png", failed.clone()).unwrap();
-		let client = reqwest::Client::builder()
+		let client = net_route::dns::apply(reqwest::Client::builder())
 			.no_proxy()
 			.redirect(reqwest::redirect::Policy::none())
 			.timeout(Duration::from_secs(5))
@@ -1118,7 +1118,7 @@ mod tests {
 			std::env::temp_dir().join(format!("serein-download-tests-{}", std::process::id()));
 		fs::create_dir_all(&root).unwrap();
 		let destination = root.join("chosen.bin");
-		let client = reqwest::Client::builder()
+		let client = net_route::dns::apply(reqwest::Client::builder())
 			.no_proxy()
 			.redirect(reqwest::redirect::Policy::none())
 			.timeout(Duration::from_secs(5))
@@ -1299,7 +1299,7 @@ mod tests {
 		));
 		fs::create_dir_all(&root).unwrap();
 		let destination = root.join("mismatch.bin");
-		let client = reqwest::Client::builder()
+		let client = net_route::dns::apply(reqwest::Client::builder())
 			.no_proxy()
 			.redirect(reqwest::redirect::Policy::none())
 			.timeout(Duration::from_secs(5))
@@ -1340,7 +1340,7 @@ mod tests {
 		));
 		fs::create_dir_all(&root).unwrap();
 		let destination = root.join("bounds.bin");
-		let client = reqwest::Client::builder()
+		let client = net_route::dns::apply(reqwest::Client::builder())
 			.no_proxy()
 			.redirect(reqwest::redirect::Policy::none())
 			.timeout(Duration::from_secs(5))

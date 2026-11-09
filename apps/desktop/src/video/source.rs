@@ -56,13 +56,12 @@ fn open(
 	if expected == 0 || expected > MAX_BYTES {
 		return Err("Video preview limit: 100 MiB");
 	}
-	let mut download = None;
 	let (input, len) = if let Some(url) = url {
 		// The caller has validated the service URL; never let URL userinfo add credentials.
 		if !url.username().is_empty() || url.password().is_some() {
 			return Err(INVALID);
 		}
-		let client = reqwest::Client::builder()
+		let client = net_route::dns::apply(reqwest::Client::builder())
 			.no_proxy()
 			.no_gzip()
 			.no_brotli()
@@ -73,7 +72,6 @@ fn open(
 			.connect_timeout(Duration::from_secs(10))
 			.build()
 			.map_err(|_| INVALID)?;
-		download = whole.then(|| cached(&client, &url, expected, &runtime));
 		(
 			Input::Http {
 				client,
@@ -93,6 +91,14 @@ fn open(
 			}
 			(Input::Demo(bytes), bytes.len())
 		}
+	};
+	let download = match &input {
+		Input::Http {
+			client,
+			url,
+			runtime,
+		} if whole => Some(cached(client, url, len, runtime)),
+		_ => None,
 	};
 	Ok(Box::new(Source {
 		input,

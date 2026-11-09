@@ -31,7 +31,7 @@ impl Playback {
 
 	pub fn new() -> Result<Self, Failure> {
 		Ok(Self {
-			client: Client::builder()
+			client: net_route::dns::apply(Client::builder())
 				.https_only(true)
 				.no_proxy()
 				.redirect(reqwest::redirect::Policy::none())

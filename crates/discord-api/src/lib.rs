@@ -238,7 +238,7 @@ pub(crate) fn browser_transport(builder: reqwest::ClientBuilder) -> reqwest::Cli
 	}
 }
 fn api_client(route: &proxy::ApiProxy) -> Result<Client, Failure> {
-	let builder = Client::builder()
+	let builder = net_route::dns::apply(Client::builder())
 		.redirect(reqwest::redirect::Policy::none())
 		// Keep writes single-attempt, including attachment slot allocation.
 		.retry(reqwest::retry::never())

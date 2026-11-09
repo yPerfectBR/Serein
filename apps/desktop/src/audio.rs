@@ -324,7 +324,7 @@ async fn fetch(
 	if expected == 0 || expected > MAX_FIXTURE_BYTES {
 		return Err(TOO_LARGE);
 	}
-	let client = reqwest::Client::builder()
+	let client = net_route::dns::apply(reqwest::Client::builder())
 		.no_proxy()
 		.redirect(reqwest::redirect::Policy::none())
 		.timeout(Duration::from_secs(60))

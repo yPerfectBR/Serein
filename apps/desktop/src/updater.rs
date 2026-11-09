@@ -450,7 +450,7 @@ const BUILD_VERSION: &str = match option_env!("SEREIN_BUILD_VERSION") {
 };
 
 fn client() -> Result<reqwest::Client, String> {
-	reqwest::Client::builder()
+	net_route::dns::apply(reqwest::Client::builder())
 		.https_only(true)
 		.no_proxy()
 		.user_agent(concat!("Serein/", env!("CARGO_PKG_VERSION")))

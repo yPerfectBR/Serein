@@ -36,7 +36,7 @@ impl Metadata {
 
 /// One client per sharing session; no credentials, proxy, redirects, persistence or retries.
 pub fn client() -> Result<Client, &'static str> {
-	Client::builder()
+	net_route::dns::apply(Client::builder())
 		.https_only(true)
 		.no_proxy()
 		.redirect(reqwest::redirect::Policy::none())
@@ -186,7 +186,7 @@ mod tests {
 				socket.write_all(response.as_bytes()).await.unwrap();
 			}
 		});
-		let client = Client::builder()
+		let client = net_route::dns::apply(Client::builder())
 			.no_proxy()
 			.redirect(reqwest::redirect::Policy::none())
 			.timeout(Duration::from_secs(2))

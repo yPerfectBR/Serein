@@ -448,6 +448,7 @@ pub fn state() -> State {
 /// Applies the route to a `reqwest` client: nothing when direct, the proxy when set, and a
 /// refused local address when the setting is invalid so requests can never go out directly.
 pub fn apply(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+	let builder = dns::apply(builder);
 	match state() {
 		State::Direct => builder,
 		State::Proxy(proxy) => match proxy
@@ -471,7 +472,7 @@ fn blackhole(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
 /// Opens a TCP stream to `host:port` through the current route.
 pub async fn connect_tcp(host: &str, port: u16) -> IoResult<TcpStream> {
 	match state() {
-		State::Direct => TcpStream::connect((host, port)).await,
+		State::Direct => dns::connect(host, port).await,
 		State::Proxy(proxy) => connect_tcp_via(&proxy, host, port).await,
 		State::Invalid(reason) => Err(Error::other(reason)),
 	}
@@ -502,12 +503,13 @@ pub async fn connect_ws_with(
 	config: Option<WebSocketConfig>,
 ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, WsError> {
 	let proxy = match route.clone() {
-		State::Direct => {
+		State::Direct if !dns::active() => {
 			return connect_async_with_config(url, config, false)
 				.await
 				.map(|(socket, _)| socket);
 		}
-		State::Proxy(proxy) => proxy,
+		State::Direct => None,
+		State::Proxy(proxy) => Some(proxy),
 		State::Invalid(reason) => return Err(WsError::Io(Error::other(reason))),
 	};
 	let parsed = Url::parse(url)
@@ -523,9 +525,11 @@ pub async fn connect_ws_with(
 	let port = parsed.port_or_known_default().ok_or(WsError::Url(
 		tokio_tungstenite::tungstenite::error::UrlError::UnsupportedUrlScheme,
 	))?;
-	let stream = connect_tcp_via(&proxy, &host, port)
-		.await
-		.map_err(WsError::Io)?;
+	let stream = match &proxy {
+		Some(proxy) => connect_tcp_via(proxy, &host, port).await,
+		None => dns::connect(&host, port).await,
+	}
+	.map_err(WsError::Io)?;
 	let request = url.into_client_request()?;
 	client_async_tls_with_config(request, stream, config, None)
 		.await
@@ -718,6 +722,7 @@ async fn http_connect<S: AsyncRead + AsyncWrite + Unpin>(
 	}
 }
 
+pub mod dns;
 pub mod tunnel;
 
 #[cfg(test)]

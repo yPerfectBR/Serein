@@ -1586,7 +1586,7 @@ async fn download_https(raw: &str, limit: usize, gate: &Gate) -> Result<Vec<u8>,
 			return Err("Extension downloads cannot access private networks".into());
 		}
 		// Pin the validated DNS result; redirects receive a fresh validation and client.
-		let client = reqwest::Client::builder()
+		let client = net_route::dns::apply(reqwest::Client::builder())
 			.no_proxy()
 			.no_gzip()
 			.redirect(reqwest::redirect::Policy::none())

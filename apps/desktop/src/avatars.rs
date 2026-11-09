@@ -3535,7 +3535,7 @@ mod tests {
             }
 		});
 		// Only this private test seam accepts HTTP; production constructs fixed HTTPS CDN URLs.
-		let client = reqwest::Client::builder()
+		let client = net_route::dns::apply(reqwest::Client::builder())
 			.no_proxy()
 			.redirect(reqwest::redirect::Policy::none())
 			.timeout(Duration::from_secs(2))
