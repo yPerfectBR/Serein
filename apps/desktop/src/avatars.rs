@@ -342,8 +342,8 @@ pub struct AvatarResult {
 
 impl AvatarResult {
 	fn bytes(&self) -> usize {
-		let pixels =
-			|image: &egui::ColorImage| image.pixels.capacity() * size_of::<egui::Color32>();
+		// egui hides the buffer's capacity; every decoder here builds an exactly sized one.
+		let pixels = |image: &egui::ColorImage| size_of_val(image.pixels());
 		size_of::<Self>()
 			+ self.key.capacity()
 			+ self.image.as_ref().map_or(0, pixels)
@@ -1241,8 +1241,8 @@ async fn run(
 	control.publish(&disks);
 	let client = (!bundled_only)
 		.then(|| {
-			net_route::apply(reqwest::Client::builder().https_only(true).no_proxy())
-				.redirect(reqwest::redirect::Policy::none())
+			net_route::apply(wreq::Client::builder().https_only(true).no_proxy())
+				.redirect(wreq::redirect::Policy::none())
 				// Originals and clips crossing a high-latency tunnel need room for their body;
 				// the connect timeout also covers DNS and the TLS handshake.
 				.timeout(Duration::from_secs(45))
@@ -1471,7 +1471,7 @@ struct Job {
 	budget: Budget,
 	cache: Option<DiskReader>,
 	error: Option<&'static str>,
-	client: Option<reqwest::Client>,
+	client: Option<wreq::Client>,
 	cooldown: Instant,
 	/// Animated sources post their first frame here while the remaining frames decode.
 	early: ResultSender,
@@ -1563,7 +1563,7 @@ async fn load(job: Job) -> Loaded {
 }
 
 async fn fetch(
-	client: &reqwest::Client,
+	client: &wreq::Client,
 	key: &str,
 	url: String,
 	until: &mut Instant,
@@ -1693,7 +1693,7 @@ fn render_lottie(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 async fn download(
-	client: &reqwest::Client,
+	client: &wreq::Client,
 	url: &str,
 	cooldown: &mut Instant,
 	limit: usize,
@@ -1701,12 +1701,13 @@ async fn download(
 	if Instant::now() < *cooldown {
 		return None;
 	}
-	let mut response = match client.get(url).send().await {
+	let send = || client_core::fingerprint::discord_request(client.get(url), url).send();
+	let response = match send().await {
 		Ok(response) => response,
 		// One retry covers a handshake dropped by a lossy link; other errors are final.
 		Err(error) if error.is_connect() || error.is_timeout() => {
 			media_log(url, &error);
-			match client.get(url).send().await {
+			match send().await {
 				Ok(response) => response,
 				Err(error) => {
 					media_log(url, &error);
@@ -1719,10 +1720,10 @@ async fn download(
 			return None;
 		}
 	};
-	if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+	if response.status() == wreq::StatusCode::TOO_MANY_REQUESTS {
 		let seconds = response
 			.headers()
-			.get(reqwest::header::RETRY_AFTER)
+			.get(wreq::header::RETRY_AFTER)
 			.and_then(|value| value.to_str().ok())
 			.and_then(|value| value.parse::<f64>().ok())
 			.filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
@@ -1746,9 +1747,10 @@ async fn download(
 	}
 	let mut bytes =
 		Vec::with_capacity(response.content_length().unwrap_or(4096).min(limit as u64) as usize);
-	while let Some(chunk) = response
-		.chunk()
+	let mut response_body = std::pin::pin!(response.bytes_stream());
+	while let Some(chunk) = futures_util::StreamExt::next(&mut response_body)
 		.await
+		.transpose()
 		.inspect_err(|error| media_log(url, error))
 		.ok()?
 	{
@@ -1952,7 +1954,10 @@ fn decode_motion_video(
 					}
 					if frames.len() >= budget.count || total + 2 * frame_bytes > budget.bytes {
 						frames = frames.chunks(2).map(|pair| pair[0].clone()).collect();
-						total = frames.iter().map(|(_, image)| image.pixels.len() * 4).sum();
+						total = frames
+							.iter()
+							.map(|(_, image)| image.pixels().len() * 4)
+							.sum();
 						stride *= 2;
 					}
 					let stored = Arc::new(egui::ColorImage::from_rgba_unmultiplied(
@@ -2069,7 +2074,10 @@ fn decode_animation(
 						)
 					})
 					.collect();
-				total = frames.iter().map(|(_, image)| image.pixels.len() * 4).sum();
+				total = frames
+					.iter()
+					.map(|(_, image)| image.pixels().len() * 4)
+					.sum();
 				stride *= 2;
 			}
 			let image = Arc::new(egui::ColorImage::from_rgba_unmultiplied(
@@ -2442,7 +2450,7 @@ mod tests {
 			std::thread::sleep(std::time::Duration::from_millis(5));
 		};
 		assert_eq!(result.key, "emoji-unicode-0-128");
-		assert_eq!(result.image.unwrap().size, [128, 128]);
+		assert_eq!(result.image.unwrap().resolution(), [128, 128]);
 		assert!(result.error.is_none());
 		assert!(
 			worker
@@ -2536,13 +2544,13 @@ mod tests {
 		let decode = if legacy { legacy_decode } else { decode };
 		let started = Instant::now();
 		let image = decode(&bytes, &budget).expect("synthetic image decodes");
-		assert_eq!(image.size, [4096, 4096]);
-		assert_eq!(image.pixels.len(), 4096 * 4096);
+		assert_eq!(image.resolution(), [4096, 4096]);
+		assert_eq!(image.pixels().len(), 4096 * 4096);
 		std::hint::black_box(&image);
 		println!(
 			"image_decode_memory_workload legacy={legacy}, elapsed_ms={:.3}, retained_pixel_bytes={}",
 			started.elapsed().as_secs_f64() * 1000.0,
-			image.pixels.capacity() * size_of::<egui::Color32>()
+			size_of_val(image.pixels())
 		);
 	}
 
@@ -2658,13 +2666,8 @@ mod tests {
 			clear_partition: async_mpsc::channel(1).0,
 			usage: watch::channel(None).1,
 		};
-		let mut oversized = queued_image(1);
-		oversized
-			.image
-			.as_mut()
-			.unwrap()
-			.pixels
-			.reserve(RESULT_BYTES / 4);
+		// Smallest square whose pixels exceed the whole result budget.
+		let oversized = queued_image((RESULT_BYTES / 4).isqrt() + 1);
 		assert!(sender.send(oversized).await);
 		assert!(sender.send(queued_image(2)).await);
 		for _ in 0..3 {
@@ -2719,7 +2722,7 @@ mod tests {
 		let mut pixels = 0;
 		let mut charged = 0;
 		while let Ok(result) = receive.try_recv() {
-			pixels += result.image.as_ref().unwrap().pixels.capacity() * 4;
+			pixels += result.image.as_ref().unwrap().pixels().len() * 4;
 			charged += result.bytes();
 		}
 		eprintln!(
@@ -2747,9 +2750,9 @@ mod tests {
 		assert_eq!(frames.len(), 2);
 		assert_eq!(frames[0].0, std::time::Duration::from_millis(100));
 		assert_eq!(frames[1].0, std::time::Duration::from_millis(200));
-		assert_eq!(frames[0].1.size, [1, 1]);
-		assert_eq!(frames[0].1.pixels[0], eframe::egui::Color32::RED);
-		assert_eq!(frames[1].1.pixels[0], eframe::egui::Color32::GREEN);
+		assert_eq!(frames[0].1.resolution(), [1, 1]);
+		assert_eq!(frames[0].1.pixels()[0], eframe::egui::Color32::RED);
+		assert_eq!(frames[1].1.pixels()[0], eframe::egui::Color32::GREEN);
 		assert!(
 			super::decode_animation(&bytes[..100], &FrameBudget::legacy(160), |_| {}).is_none()
 		);
@@ -2802,7 +2805,7 @@ mod tests {
 		assert_eq!(
 			super::decode(&png, &Budget::legacy(ui::EMBED_EDGE))
 				.unwrap()
-				.size,
+				.resolution(),
 			[160, 160]
 		);
 		assert!(super::render_lottie(&vec![b' '; super::MAX_LOTTIE_ENCODED + 1]).is_none());
@@ -2974,9 +2977,9 @@ mod tests {
 		let frames = super::decode_animation(&bytes, &FrameBudget::legacy(128), |_| {}).unwrap();
 		assert_eq!(frames.len(), 2);
 		assert!(frames.iter().all(|(delay, image)| {
-			*delay == Duration::from_millis(100) && image.size == [128, 128]
+			*delay == Duration::from_millis(100) && image.resolution() == [128, 128]
 		}));
-		assert_ne!(frames[0].1.pixels[0], frames[1].1.pixels[0]);
+		assert_ne!(frames[0].1.pixels()[0], frames[1].1.pixels()[0]);
 	}
 
 	#[test]
@@ -3008,7 +3011,7 @@ mod tests {
 		assert!(
 			frames
 				.iter()
-				.map(|(_, image)| image.pixels.len() * 4)
+				.map(|(_, image)| image.pixels().len() * 4)
 				.sum::<usize>()
 				<= 8 * 1024 * 1024
 		);
@@ -3036,8 +3039,8 @@ mod tests {
 		let frames = super::decode_animation(&bytes, &FrameBudget::legacy(160), |_| {}).unwrap();
 		assert_eq!(frames.len(), 2);
 		assert_eq!(frames[0].0, std::time::Duration::from_millis(100));
-		assert_eq!(frames[0].1.size, [160, 80]);
-		assert_ne!(frames[0].1.pixels[0], frames[1].1.pixels[0]);
+		assert_eq!(frames[0].1.resolution(), [160, 80]);
+		assert_ne!(frames[0].1.pixels()[0], frames[1].1.pixels()[0]);
 		assert!(super::decode_animation(b"not a GIF", &FrameBudget::legacy(160), |_| {}).is_none());
 		assert!(
 			super::decode_animation(
@@ -3378,17 +3381,23 @@ mod tests {
 		let legacy = Budget::legacy;
 		assert!(decode(&png(1025, 1), &legacy(512)).is_none());
 		assert_eq!(
-			decode(&png(1024, 512), &legacy(512)).unwrap().size,
+			decode(&png(1024, 512), &legacy(512)).unwrap().resolution(),
 			[512, 256]
 		);
 		let media = budget("media:vs:2048x1024:https://cdn.discordapp.com/attachments/1/2/a.png");
-		assert_eq!(decode(&png(1024, 512), &media).unwrap().size, [1024, 512]);
+		assert_eq!(
+			decode(&png(1024, 512), &media).unwrap().resolution(),
+			[1024, 512]
+		);
 		assert!(decode(&png(8193, 1), &media).is_none());
 		assert!(decode(&vec![0; MAX_ENCODED + 1], &legacy(128)).is_none());
 		assert!(decode(b"not an image", &legacy(128)).is_none());
 		assert!(decode(&png(257, 1), &legacy(128)).is_none());
 		let bytes = png(256, 256);
-		assert_eq!(decode(&bytes, &legacy(128)).unwrap().size, [128, 128]);
+		assert_eq!(
+			decode(&bytes, &legacy(128)).unwrap().resolution(),
+			[128, 128]
+		);
 		let root = std::env::temp_dir().join(format!(
 			"serein-avatar-test-{}-{}",
 			std::process::id(),
@@ -3480,7 +3489,7 @@ mod tests {
 				.unwrap()
 				.unwrap()
 		});
-		assert_eq!(result.image.unwrap().size, [128, 128]);
+		assert_eq!(result.image.unwrap().resolution(), [128, 128]);
 		assert!(result.error.is_none());
 		// Fill the result channel, then cancel: shutdown must not wait on the renderer.
 		for _ in 0..32 {
@@ -3535,9 +3544,9 @@ mod tests {
             }
 		});
 		// Only this private test seam accepts HTTP; production constructs fixed HTTPS CDN URLs.
-		let client = net_route::dns::apply(reqwest::Client::builder())
+		let client = net_route::dns::apply(wreq::Client::builder())
 			.no_proxy()
-			.redirect(reqwest::redirect::Policy::none())
+			.redirect(wreq::redirect::Policy::none())
 			.timeout(Duration::from_secs(2))
 			.build()
 			.unwrap();

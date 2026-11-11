@@ -18,10 +18,6 @@ use tokio::{
 	io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
 	net::TcpStream,
 };
-use tokio_tungstenite::{
-	MaybeTlsStream, WebSocketStream, client_async_tls_with_config, connect_async_with_config,
-	tungstenite::{Error as WsError, client::IntoClientRequest, protocol::WebSocketConfig},
-};
 use url::Url;
 use zeroize::Zeroizing;
 
@@ -192,8 +188,8 @@ impl Proxy {
 		})
 	}
 
-	/// The proxy as a `reqwest` URL (`socks5h` so the proxy resolves names).
-	fn reqwest_url(&self) -> Option<Url> {
+	/// The proxy as a `wreq` URL (`socks5h` so the proxy resolves names).
+	fn client_url(&self) -> Option<Url> {
 		let scheme = match self.kind {
 			Kind::Socks5 => "socks5h",
 			Kind::HttpConnect => "http",
@@ -445,15 +441,21 @@ pub fn state() -> State {
 	ROUTE.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// Applies the route to a `reqwest` client: nothing when direct, the proxy when set, and a
-/// refused local address when the setting is invalid so requests can never go out directly.
-pub fn apply(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+/// Applies the current route to a `wreq` client; see [`apply_route`].
+pub fn apply(builder: wreq::ClientBuilder) -> wreq::ClientBuilder {
+	apply_route(builder, &state())
+}
+
+/// Applies `route` to a `wreq` client: nothing when direct, the proxy when set, and a refused
+/// local address when the setting is invalid so requests can never go out directly. Inside the
+/// tunnel, names resolve through its DNS servers.
+pub fn apply_route(builder: wreq::ClientBuilder, route: &State) -> wreq::ClientBuilder {
 	let builder = dns::apply(builder);
-	match state() {
+	match route {
 		State::Direct => builder,
 		State::Proxy(proxy) => match proxy
-			.reqwest_url()
-			.and_then(|u| reqwest::Proxy::all(u).ok())
+			.client_url()
+			.and_then(|u| wreq::Proxy::all(u.as_str()).ok())
 		{
 			Some(p) => builder.no_proxy().proxy(p),
 			None => blackhole(builder),
@@ -462,8 +464,8 @@ pub fn apply(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
 	}
 }
 
-fn blackhole(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-	match reqwest::Proxy::all("http://127.0.0.1:1") {
+fn blackhole(builder: wreq::ClientBuilder) -> wreq::ClientBuilder {
+	match wreq::Proxy::all("http://127.0.0.1:1") {
 		Ok(p) => builder.no_proxy().proxy(p),
 		Err(_) => builder.no_proxy(),
 	}
@@ -488,82 +490,9 @@ pub async fn connect_tcp_via(proxy: &Proxy, host: &str, port: u16) -> IoResult<T
 	Ok(stream)
 }
 
-/// Drop-in for `connect_async_with_config` that honours the route.
-pub async fn connect_ws(
-	url: &str,
-	config: Option<WebSocketConfig>,
-) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, WsError> {
-	connect_ws_with(&state(), url, config).await
-}
-
-/// Like [`connect_ws`] for an explicit route, so a candidate setting can be tested before it is saved.
-pub async fn connect_ws_with(
-	route: &State,
-	url: &str,
-	config: Option<WebSocketConfig>,
-) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, WsError> {
-	let proxy = match route.clone() {
-		State::Direct if !dns::active() => {
-			return connect_async_with_config(url, config, false)
-				.await
-				.map(|(socket, _)| socket);
-		}
-		State::Direct => None,
-		State::Proxy(proxy) => Some(proxy),
-		State::Invalid(reason) => return Err(WsError::Io(Error::other(reason))),
-	};
-	let parsed = Url::parse(url)
-		.map_err(|_| WsError::Url(tokio_tungstenite::tungstenite::error::UrlError::NoHostName))?;
-	let host = parsed
-		.host_str()
-		.ok_or(WsError::Url(
-			tokio_tungstenite::tungstenite::error::UrlError::NoHostName,
-		))?
-		.trim_start_matches('[')
-		.trim_end_matches(']')
-		.to_owned();
-	let port = parsed.port_or_known_default().ok_or(WsError::Url(
-		tokio_tungstenite::tungstenite::error::UrlError::UnsupportedUrlScheme,
-	))?;
-	let stream = match &proxy {
-		Some(proxy) => connect_tcp_via(proxy, &host, port).await,
-		None => dns::connect(&host, port).await,
-	}
-	.map_err(WsError::Io)?;
-	let request = url.into_client_request()?;
-	client_async_tls_with_config(request, stream, config, None)
-		.await
-		.map(|(socket, _)| socket)
-}
-
-/// Where [`probe_gateway`] connects.
+/// Where the gateway probe (`client_core::fingerprint::probe_gateway`) connects.
 pub const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 
-/// Opens the Discord gateway through `route` and waits for its first frame (opcode 10, Hello).
-/// It sends no credentials and signs in to nothing. Returns the time to the Hello frame.
-pub async fn probe_gateway(route: &State) -> Result<std::time::Duration, String> {
-	use futures_util::StreamExt;
-	use std::time::Duration;
-	use tokio_tungstenite::tungstenite::Message;
-
-	let started = std::time::Instant::now();
-	let short =
-		|text: String| -> String { text.chars().filter(|c| !c.is_control()).take(160).collect() };
-	let mut socket = tokio::time::timeout(
-		Duration::from_secs(15),
-		connect_ws_with(route, GATEWAY_URL, None),
-	)
-	.await
-	.map_err(|_| "timed out".to_owned())?
-	.map_err(|error| short(error.to_string()))?;
-	match tokio::time::timeout(Duration::from_secs(10), socket.next()).await {
-		Ok(Some(Ok(Message::Text(text)))) if text.contains("\"op\":10") => Ok(started.elapsed()),
-		Ok(Some(Ok(_))) => Err("unexpected first frame".to_owned()),
-		Ok(Some(Err(error))) => Err(short(error.to_string())),
-		Ok(None) => Err("closed before the first frame".to_owned()),
-		Err(_) => Err("no answer from the gateway".to_owned()),
-	}
-}
 
 type Credentials = (Zeroizing<String>, Zeroizing<String>);
 

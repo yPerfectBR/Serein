@@ -1302,7 +1302,7 @@ async fn run_recoverable(
 		let Some(connection) = recoverable_wait(
 			timeout(
 				Duration::from_secs(15),
-				net_route::connect_ws(url, Some(config)),
+				client_core::fingerprint::websocket(url, config),
 			),
 			if was_ready { reconnect } else { None },
 		)

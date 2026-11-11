@@ -708,7 +708,10 @@ fn demo_check_updates() {
 	assert!(!messaging.updates.auto_update && messaging.updates.nightly);
 	messaging.open_update_settings();
 	let mut state = test_support::demo_state();
-	for size in [[1120.0, 760.0], [760.0, 520.0]] {
+	for size in [
+		[1120.0, 760.0],
+		app_settings::MIN_WINDOW_SIZE.map(|size| size as f32),
+	] {
 		for theme in [egui::ThemePreference::Dark, egui::ThemePreference::Light] {
 			ctx.set_theme(theme);
 			let output = ctx.run_ui(
@@ -1946,11 +1949,7 @@ impl Desktop {
 					)
 				})
 				.collect();
-			let image = egui::ColorImage {
-				size: [width, height],
-				source_size: egui::vec2(width as f32, height as f32),
-				pixels,
-			};
+			let image = egui::ColorImage::new([width, height], pixels);
 			let texture =
 				cc.egui_ctx
 					.load_texture("synthetic-stream", image, egui::TextureOptions::LINEAR);
@@ -1989,11 +1988,7 @@ impl Desktop {
 					egui::Color32::from_rgb((90.0 + 120.0 * x) as u8, (60.0 + 90.0 * y) as u8, 140)
 				})
 				.collect();
-			let image = egui::ColorImage {
-				size: [width, height],
-				source_size: egui::vec2(width as f32, height as f32),
-				pixels,
-			};
+			let image = egui::ColorImage::new([width, height], pixels);
 			let texture = cc.egui_ctx.load_texture(
 				"synthetic-remote-camera",
 				image,
@@ -2199,11 +2194,7 @@ impl Desktop {
 						}
 					})
 					.collect();
-				egui::ColorImage {
-					size: [width, height],
-					source_size: egui::vec2(width as f32, height as f32),
-					pixels,
-				}
+				egui::ColorImage::new([width, height], pixels)
 			};
 			messaging.preview_attachment(
 				"synthetic-holiday.png",
@@ -5599,6 +5590,11 @@ impl eframe::App for Desktop {
 	}
 	fn persist_egui_memory(&self) -> bool {
 		false
+	}
+	fn repaint_on_device_event(&mut self, event: &winit::event::DeviceEvent) -> Option<bool> {
+		// Raw motion duplicates the window's cursor events, which still repaint for hover;
+		// Serein never reads it (`PointerState::motion`).
+		matches!(event, winit::event::DeviceEvent::MouseMotion { .. }).then_some(false)
 	}
 	fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
 		// Before the pass begins, so the whole frame resolves System to the same theme.

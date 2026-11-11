@@ -449,16 +449,18 @@ const BUILD_VERSION: &str = match option_env!("SEREIN_BUILD_VERSION") {
 	None => env!("CARGO_PKG_VERSION"),
 };
 
-fn client() -> Result<reqwest::Client, String> {
-	net_route::dns::apply(reqwest::Client::builder())
+fn client() -> Result<wreq::Client, String> {
+	net_route::dns::apply(wreq::Client::builder())
 		.https_only(true)
 		.no_proxy()
 		.user_agent(concat!("Serein/", env!("CARGO_PKG_VERSION")))
 		.connect_timeout(Duration::from_secs(10))
 		.read_timeout(Duration::from_secs(30))
 		.timeout(Duration::from_secs(600))
-		.redirect(reqwest::redirect::Policy::custom(|attempt| {
-			if attempt.previous().len() < 5 && trusted_url(attempt.url()) {
+		.redirect(wreq::redirect::Policy::custom(|attempt| {
+			if attempt.previous.len() < 5
+				&& url::Url::parse(&attempt.uri.to_string()).is_ok_and(|url| trusted_url(&url))
+			{
 				attempt.follow()
 			} else {
 				attempt.error("Untrusted update redirect")
@@ -482,13 +484,13 @@ fn trusted_url(url: &url::Url) -> bool {
 			)
 		)
 }
-async fn response(client: &reqwest::Client, url: &str) -> Result<reqwest::Response, String> {
+async fn response(client: &wreq::Client, url: &str) -> Result<wreq::Response, String> {
 	if !url::Url::parse(url).is_ok_and(|url| trusted_url(&url)) {
 		return Err("The release contains an untrusted download address.".into());
 	}
 	let response = client
 		.get(url)
-		.header(reqwest::header::ACCEPT, "application/vnd.github+json")
+		.header(wreq::header::ACCEPT, "application/vnd.github+json")
 		.send()
 		.await
 		.map_err(|_| "Could not reach GitHub. Check your connection and try again.".to_owned())?;
@@ -500,12 +502,12 @@ async fn response(client: &reqwest::Client, url: &str) -> Result<reqwest::Respon
 	}
 }
 async fn bounded_body(
-	client: &reqwest::Client,
+	client: &wreq::Client,
 	url: &str,
 	limit: usize,
 	cancel: &AtomicBool,
 ) -> Result<Vec<u8>, String> {
-	let mut response = response(client, url).await?;
+	let response = response(client, url).await?;
 	if response
 		.content_length()
 		.is_some_and(|length| length > limit as u64)
@@ -513,9 +515,10 @@ async fn bounded_body(
 		return Err("Release metadata exceeds the size limit.".into());
 	}
 	let mut body = Vec::new();
-	while let Some(chunk) = response
-		.chunk()
+	let mut response_body = std::pin::pin!(response.bytes_stream());
+	while let Some(chunk) = futures_util::StreamExt::next(&mut response_body)
 		.await
+		.transpose()
 		.map_err(|_| "The update response was interrupted.".to_owned())?
 	{
 		if cancel.load(Ordering::Relaxed) {
@@ -876,7 +879,7 @@ async fn download_package(
 }
 
 async fn download_full(
-	client: &reqwest::Client,
+	client: &wreq::Client,
 	archive: &Asset,
 	directory: &std::path::Path,
 	expected: &[u8; 32],
@@ -884,7 +887,7 @@ async fn download_full(
 	progress: &AtomicU64,
 ) -> Result<(), String> {
 	use tokio::io::AsyncWriteExt;
-	let mut response = response(client, &archive.browser_download_url).await?;
+	let response = response(client, &archive.browser_download_url).await?;
 	if response
 		.content_length()
 		.is_some_and(|size| size != archive.size)
@@ -899,9 +902,10 @@ async fn download_full(
 		.map_err(|_| "Could not create the update download.".to_owned())?;
 	let mut hasher = Sha256::new();
 	let mut received = 0_u64;
-	while let Some(chunk) = response
-		.chunk()
+	let mut response_body = std::pin::pin!(response.bytes_stream());
+	while let Some(chunk) = futures_util::StreamExt::next(&mut response_body)
 		.await
+		.transpose()
 		.map_err(|_| "The update download was interrupted.".to_owned())?
 	{
 		if cancel.load(Ordering::Relaxed) {

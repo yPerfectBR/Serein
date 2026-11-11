@@ -1734,6 +1734,8 @@ markdown-confirm-external-link-open-external-link = Open external link?
 # Context: confirm_external_link
 markdown-confirm-external-link-open-in-browser = Open in Browser
 # Context: confirm_external_link
+markdown-confirm-external-link-only-the-start-fits = Only the start of this message fits in the link; the rest is not sent. This destination opens in your default browser.
+# Context: confirm_external_link
 markdown-confirm-external-link-this-destination-opens-in-your-default-browser = This destination opens in your default browser.
 # Context: show_emoji
 markdown-show-emoji-copy-emoji = Copy emoji
@@ -2320,6 +2322,8 @@ screen-body-send-what-your-mac-plays-along-with-the-screen-serein = Send what yo
 screen-body-share-sound-from-other-apps-even-when-sharing-one-window = Share sound from other apps, even when sharing one window. Serein's own audio is left out.
 # Context: body
 screen-body-share-system-audio = Share system audio
+# Context: body
+screen-body-share-the-shared-apps-sound-or-other-apps-for-a-screen = Share the shared app's sound, or every other app's sound when sharing a screen. Serein's own audio is left out.
 # Context: body
 screen-body-show-cursor = Show cursor
 # Context: body
@@ -3917,6 +3921,10 @@ timeline-message-actions-delete-message = Delete message…
 timeline-message-actions-edit-message = Edit message
 # Context: message_actions
 timeline-message-actions-extensions = Extensions
+# Context: menu
+extensions-ui-menu-group-user = User
+# Context: menu
+extensions-ui-menu-group-conversation = Conversation
 # Context: message_actions
 timeline-message-actions-forward = Forward
 # Context: message_actions
@@ -3927,6 +3935,7 @@ timeline-message-actions-mark-unread = Mark Unread
 timeline-message-actions-pin-message = Pin message
 # Context: message_actions
 timeline-message-actions-reply = Reply
+timeline-message-actions-translate = Translate (opens browser)
 # Context: message_actions
 timeline-message-actions-unpin-message = Unpin message
 # Context: message_actions
@@ -3966,6 +3975,8 @@ timeline-show-with-scroll-history-is-not-available-yet-use-reload-to-try-again =
 timeline-show-with-scroll-loading-messages = Loading messages…
 # Context: show_with_scroll
 timeline-show-with-scroll-message-deleted = Message deleted
+# Context: show_with_scroll
+timeline-show-with-scroll-message-blocked = Blocked message
 # Context: show_with_scroll
 timeline-show-with-scroll-message-history-is-unavailable-with-current-permission-information = Message history is unavailable with current permission information.
 # Context: show_with_scroll
@@ -4618,6 +4629,7 @@ public-upload-error-conversation = Return to the original conversation and revie
 public-upload-error-selection = Selection changed; review the file again before uploading publicly
 public-upload-error-missing = Select the file again before uploading publicly
 
+message-preview-limit = This message exceeds the native text layout limit.
 voice-call-moved-to-another-client = This device's call session was replaced
 
 # Synchronized favorite GIFs (unofficial account settings).

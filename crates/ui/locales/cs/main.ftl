@@ -1717,6 +1717,8 @@ markdown-confirm-external-link-open-external-link = Otevřít externí odkaz?
 # Context: confirm_external_link
 markdown-confirm-external-link-open-in-browser = Otevřít v prohlížeči
 # Context: confirm_external_link
+markdown-confirm-external-link-only-the-start-fits = Do odkazu se vejde jen začátek této zprávy; zbytek se neodešle. Cíl se otevře ve výchozím prohlížeči.
+# Context: confirm_external_link
 markdown-confirm-external-link-this-destination-opens-in-your-default-browser = Tento cíl se otevře ve vašem výchozím prohlížeči.
 # Context: show_emoji
 markdown-show-emoji-copy-emoji = Kopírovat emotikony
@@ -2301,6 +2303,8 @@ screen-body-send-what-your-mac-plays-along-with-the-screen-serein = Odesílejte,
 screen-body-share-sound-from-other-apps-even-when-sharing-one-window = Sdílejte zvuk z jiných aplikací, i když sdílíte jedno okno. Serein vlastní zvuk je vynechán.
 # Context: body
 screen-body-share-system-audio = Sdílejte systémový zvuk
+# Context: body
+screen-body-share-the-shared-apps-sound-or-other-apps-for-a-screen = Sdílejte zvuk sdílené aplikace, nebo při sdílení obrazovky zvuk všech ostatních aplikací. Serein vlastní zvuk je vynechán.
 # Context: body
 screen-body-show-cursor = Zobrazit kurzor
 # Context: body
@@ -3901,6 +3905,10 @@ timeline-message-actions-delete-message = Smazat zprávu…
 timeline-message-actions-edit-message = Upravit zprávu
 # Context: message_actions
 timeline-message-actions-extensions = Rozšíření
+# Context: menu
+extensions-ui-menu-group-user = Uživatel
+# Context: menu
+extensions-ui-menu-group-conversation = Konverzace
 # Context: message_actions
 timeline-message-actions-forward = Přeposlat
 # Context: message_actions
@@ -3951,6 +3959,8 @@ timeline-show-with-scroll-history-is-not-available-yet-use-reload-to-try-again =
 timeline-show-with-scroll-loading-messages = Načítání zpráv…
 # Context: show_with_scroll
 timeline-show-with-scroll-message-deleted = Zpráva smazána
+# Context: show_with_scroll
+timeline-show-with-scroll-message-blocked = Blokovaná zpráva
 # Context: show_with_scroll
 timeline-show-with-scroll-message-history-is-unavailable-with-current-permission-information = Historie zpráv není s aktuálními informacemi o oprávnění k dispozici.
 # Context: show_with_scroll
@@ -4603,6 +4613,7 @@ public-upload-error-conversation = Před veřejným nahráním se vraťte do pů
 public-upload-error-selection = Výběr se změnil; před veřejným nahráním znovu zkontrolujte soubor
 public-upload-error-missing = Před veřejným nahráním znovu vyberte soubor
 
+message-preview-limit = Tato zpráva překračuje limit nativního rozvržení textu.
 voice-call-moved-to-another-client = Relace hovoru na tomto zařízení byla nahrazena
 
 # Synchronizované oblíbené GIFy (neoficiální nastavení účtu).

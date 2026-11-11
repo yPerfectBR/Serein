@@ -6,7 +6,22 @@ use tokio::{
 	net::TcpListener,
 	sync::Mutex,
 };
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{
+	WebSocketStream,
+	tungstenite::{Message, protocol::Role},
+};
+
+/// A plain WebSocket through `route`, as the browser-identity dialer in `client-core` opens it.
+async fn websocket(route: &State, url: &str) -> Result<WebSocketStream<wreq::Upgraded>, wreq::Error> {
+	let socket = apply_route(wreq::Client::builder().no_proxy(), route)
+		.build()?
+		.websocket(url)
+		.send()
+		.await?
+		.into_websocket()
+		.await?;
+	Ok(WebSocketStream::from_raw_socket(socket.into_inner(), Role::Client, None).await)
+}
 
 // The route is process-wide; tests that change it run one at a time.
 fn route_lock() -> &'static Mutex<()> {
@@ -389,7 +404,7 @@ async fn websocket_goes_through_the_proxy_and_invalid_routes_fail_closed() {
 		Proxy::parse(&format!("socks5://127.0.0.1:{port}")).unwrap(),
 	));
 
-	let mut socket = connect_ws("ws://gateway.example.invalid:80/?v=10", None)
+	let mut socket = websocket(&state(), "ws://gateway.example.invalid:80/?v=10")
 		.await
 		.unwrap();
 	socket.send(Message::Text("hi".into())).await.unwrap();
@@ -405,8 +420,10 @@ async fn websocket_goes_through_the_proxy_and_invalid_routes_fail_closed() {
 	);
 
 	set(State::Invalid("Proxy URL rejected: test"));
-	let error = connect_ws("ws://127.0.0.1:1/", None).await.unwrap_err();
-	assert!(error.to_string().contains("Proxy URL rejected"), "{error}");
+	assert!(
+		websocket(&state(), "ws://127.0.0.1:1/").await.is_err(),
+		"an invalid route must never fall back to a direct connection"
+	);
 	assert!(
 		connect_tcp("127.0.0.1", 1)
 			.await
@@ -445,7 +462,7 @@ async fn rest_clients_use_the_http_and_socks_routes_and_fail_closed() {
 	set(State::Proxy(
 		Proxy::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
 	));
-	let client = apply(reqwest::Client::builder()).build().unwrap();
+	let client = apply(wreq::Client::builder()).build().unwrap();
 	let body = client
 		.get("http://rest.example.invalid/api")
 		.send()
@@ -469,7 +486,7 @@ async fn rest_clients_use_the_http_and_socks_routes_and_fail_closed() {
 	set(State::Proxy(
 		Proxy::parse(&format!("socks5://127.0.0.1:{socks}")).unwrap(),
 	));
-	let client = apply(reqwest::Client::builder()).build().unwrap();
+	let client = apply(wreq::Client::builder()).build().unwrap();
 	let body = client
 		.get("http://socks.example.invalid/api")
 		.send()
@@ -482,7 +499,7 @@ async fn rest_clients_use_the_http_and_socks_routes_and_fail_closed() {
 	assert_eq!(log.lock().unwrap().as_slice(), ["socks.example.invalid:80"]);
 
 	set(State::Invalid("Proxy URL rejected: test"));
-	let client = apply(reqwest::Client::builder()).build().unwrap();
+	let client = apply(wreq::Client::builder()).build().unwrap();
 	assert!(
 		client
 			.get("http://rest.example.invalid/api")
@@ -643,7 +660,7 @@ async fn candidate_routes_can_be_tested_without_changing_the_process_route() {
 	let log = Arc::new(std::sync::Mutex::new(Vec::new()));
 	let port = spawn_socks_proxy(log.clone(), echo_addr.to_string()).await;
 	let candidate = State::Proxy(Proxy::new(Kind::Socks5, "127.0.0.1", port, None).unwrap());
-	let mut socket = connect_ws_with(&candidate, "ws://candidate.example.invalid:80/", None)
+	let mut socket = websocket(&candidate, "ws://candidate.example.invalid:80/")
 		.await
 		.unwrap();
 	assert!(matches!(socket.next().await, Some(Ok(Message::Text(ref t))) if t.as_str() == "hello"));
@@ -652,21 +669,9 @@ async fn candidate_routes_can_be_tested_without_changing_the_process_route() {
 		["candidate.example.invalid:80"]
 	);
 	// A candidate that is itself invalid fails closed without any network access.
-	let error = connect_ws_with(&State::Invalid("nope"), "ws://127.0.0.1:1/", None)
-		.await
-		.unwrap_err();
-	assert!(error.to_string().contains("nope"));
-}
-
-#[tokio::test]
-async fn gateway_probe_reports_success_and_failures_without_credentials() {
-	// A local "gateway": a plain TCP server cannot speak wss, so test the failure mapping here and
-	// the success path against the real gateway in the example run.
-	let state = State::Proxy(Proxy::new(Kind::Socks5, "127.0.0.1", 1, None).unwrap());
-	let error = probe_gateway(&state).await.unwrap_err();
-	assert!(!error.is_empty() && error.len() <= 160, "{error}");
-	let invalid = probe_gateway(&State::Invalid("Proxy URL rejected: test"))
-		.await
-		.unwrap_err();
-	assert!(invalid.contains("Proxy URL rejected"), "{invalid}");
+	assert!(
+		websocket(&State::Invalid("nope"), "ws://127.0.0.1:1/")
+			.await
+			.is_err()
+	);
 }

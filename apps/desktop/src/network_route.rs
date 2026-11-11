@@ -382,7 +382,7 @@ impl Handler {
 				form.busy = true;
 				runtime.spawn(async move {
 					// This process is already inside the tunnel, so the direct route is the tunnel.
-					let outcome = match net_route::probe_gateway(&net_route::State::Direct).await {
+					let outcome = match client_core::fingerprint::probe_gateway(&net_route::State::Direct).await {
 						Ok(elapsed) => Outcome::Tested(Ok(elapsed.as_millis())),
 						Err(reason) => Outcome::Tested(Err(reason)),
 					};
@@ -407,7 +407,7 @@ impl Handler {
 					})
 					.await
 					{
-						Ok(Ok(state)) => match net_route::probe_gateway(&state).await {
+						Ok(Ok(state)) => match client_core::fingerprint::probe_gateway(&state).await {
 							Ok(elapsed) => Outcome::Tested(Ok(elapsed.as_millis())),
 							Err(reason) => Outcome::Tested(Err(reason)),
 						},

@@ -52,8 +52,8 @@ pub(crate) fn parse_servers(contents: &str) -> Vec<IpAddr> {
 		.collect()
 }
 
-/// Uses the tunnel resolvers for this `reqwest` client when running inside the tunnel.
-pub fn apply(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+/// Uses the tunnel resolvers for this `wreq` client when running inside the tunnel.
+pub fn apply(builder: wreq::ClientBuilder) -> wreq::ClientBuilder {
 	if active() {
 		builder.dns_resolver(Arc::new(TunnelResolver))
 	} else {
@@ -79,12 +79,12 @@ pub async fn connect(host: &str, port: u16) -> IoResult<TcpStream> {
 
 struct TunnelResolver;
 
-impl reqwest::dns::Resolve for TunnelResolver {
-	fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+impl wreq::dns::Resolve for TunnelResolver {
+	fn resolve(&self, name: wreq::dns::Name) -> wreq::dns::Resolving {
 		let host = name.as_str().to_owned();
 		Box::pin(async move {
 			let addresses = lookup(&host).await?;
-			let addresses: reqwest::dns::Addrs =
+			let addresses: wreq::dns::Addrs =
 				Box::new(addresses.into_iter().map(|ip| SocketAddr::new(ip, 0)));
 			Ok(addresses)
 		})

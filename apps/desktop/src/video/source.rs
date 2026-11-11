@@ -61,13 +61,13 @@ fn open(
 		if !url.username().is_empty() || url.password().is_some() {
 			return Err(INVALID);
 		}
-		let client = net_route::dns::apply(reqwest::Client::builder())
+		let client = net_route::dns::apply(wreq::Client::builder())
 			.no_proxy()
 			.no_gzip()
 			.no_brotli()
 			.no_deflate()
 			.no_zstd()
-			.redirect(reqwest::redirect::Policy::none())
+			.redirect(wreq::redirect::Policy::none())
 			.timeout(Duration::from_secs(30))
 			.connect_timeout(Duration::from_secs(10))
 			.build()
@@ -128,7 +128,7 @@ struct Download {
 
 /// The cached download of this attachment, starting it when absent. Signed query strings
 /// change between fetches of one attachment, so the path is the key.
-fn cached(client: &reqwest::Client, url: &url::Url, len: usize, runtime: &Handle) -> Arc<Download> {
+fn cached(client: &wreq::Client, url: &url::Url, len: usize, runtime: &Handle) -> Arc<Download> {
 	let key = format!("{}{}", url.host_str().unwrap_or_default(), url.path());
 	let mut cache = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 	if let Some(index) = cache.iter().position(|(cached, download)| {
@@ -184,28 +184,32 @@ fn cached(client: &reqwest::Client, url: &url::Url, len: usize, runtime: &Handle
 }
 
 async fn fetch_whole(
-	client: &reqwest::Client,
+	client: &wreq::Client,
 	url: &url::Url,
 	len: usize,
 	download: &Download,
 ) -> Result<(), String> {
-	let mut response = client
-		.get(url.clone())
-		.header(reqwest::header::ACCEPT_ENCODING, "identity")
+	let response = client_core::fingerprint::discord_request(client.get(url.as_str()), url.as_str())
+		.header(wreq::header::ACCEPT_ENCODING, "identity")
 		.timeout(Duration::from_secs(600))
 		.send()
 		.await
 		.map_err(|error| error.to_string())?;
-	if response.status() != reqwest::StatusCode::OK
+	if response.status() != wreq::StatusCode::OK
 		|| response
 			.headers()
-			.get(reqwest::header::CONTENT_ENCODING)
+			.get(wreq::header::CONTENT_ENCODING)
 			.is_some_and(|value| value != "identity")
 		|| response.content_length().is_some_and(|length| length != len as u64)
 	{
 		return Err(format!("unexpected response {}", response.status()));
 	}
-	while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+	let mut body = std::pin::pin!(response.bytes_stream());
+	while let Some(chunk) = futures_util::StreamExt::next(&mut body)
+		.await
+		.transpose()
+		.map_err(|error| error.to_string())?
+	{
 		let mut progress = download.progress.lock().map_err(|_| "poisoned")?;
 		if chunk.len() > len - progress.bytes.len() {
 			return Err("longer than the attachment".into());
@@ -223,7 +227,7 @@ async fn fetch_whole(
 
 enum Input {
 	Http {
-		client: reqwest::Client,
+		client: wreq::Client,
 		url: url::Url,
 		runtime: Handle,
 	},
@@ -242,7 +246,7 @@ fn invalid() -> io::Error {
 	io::Error::new(io::ErrorKind::InvalidData, INVALID)
 }
 /// A network failure worth one retry, unlike a malformed or refused response.
-fn transient(url: &url::Url, error: &reqwest::Error) -> io::Error {
+fn transient(url: &url::Url, error: &wreq::Error) -> io::Error {
 	crate::avatars::media_log(url.as_str(), error);
 	io::Error::new(io::ErrorKind::TimedOut, INVALID)
 }
@@ -283,18 +287,20 @@ impl Source {
 				}
 			};
 			let fetch = || async {
-				let mut response = client
-					.get(url.clone())
-					.header(reqwest::header::ACCEPT_ENCODING, "identity")
-					.header(reqwest::header::RANGE, format!("bytes={start}-{end}"))
-					.send()
-					.await
-					.map_err(|error| transient(url, &error))?;
-				if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+				let response = client_core::fingerprint::discord_request(
+					client.get(url.as_str()),
+					url.as_str(),
+				)
+				.header(wreq::header::ACCEPT_ENCODING, "identity")
+				.header(wreq::header::RANGE, format!("bytes={start}-{end}"))
+				.send()
+				.await
+				.map_err(|error| transient(url, &error))?;
+				if response.status() == wreq::StatusCode::PARTIAL_CONTENT {
 					let range = format!("bytes {start}-{end}/{}", self.len);
 					if response
 						.headers()
-						.get(reqwest::header::CONTENT_RANGE)
+						.get(wreq::header::CONTENT_RANGE)
 						.and_then(|value| value.to_str().ok())
 						!= Some(range.as_str())
 					{
@@ -302,12 +308,12 @@ impl Source {
 							url.as_str(),
 							format_args!(
 								"expected {range}, got {:?}",
-								response.headers().get(reqwest::header::CONTENT_RANGE)
+								response.headers().get(wreq::header::CONTENT_RANGE)
 							),
 						);
 						return Err(invalid());
 					}
-				} else if !(response.status() == reqwest::StatusCode::OK
+				} else if !(response.status() == wreq::StatusCode::OK
 					&& start == 0 && count == self.len)
 				{
 					crate::avatars::media_log(url.as_str(), response.status());
@@ -315,7 +321,7 @@ impl Source {
 				}
 				if response
 					.headers()
-					.get(reqwest::header::CONTENT_ENCODING)
+					.get(wreq::header::CONTENT_ENCODING)
 					.is_some_and(|value| value != "identity")
 					|| response
 						.content_length()
@@ -328,9 +334,10 @@ impl Source {
 					return Err(invalid());
 				}
 				let mut bytes = Vec::with_capacity(count);
-				while let Some(chunk) = response
-					.chunk()
+				let mut response_body = std::pin::pin!(response.bytes_stream());
+				while let Some(chunk) = futures_util::StreamExt::next(&mut response_body)
 					.await
+					.transpose()
 					.map_err(|error| transient(url, &error))?
 				{
 					if chunk.len() > count - bytes.len() {
