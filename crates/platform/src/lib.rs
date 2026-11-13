@@ -39,6 +39,8 @@ use std::{
 #[cfg(not(target_os = "linux"))]
 use wry::{WebView, WebViewBuilder};
 #[cfg(target_os = "linux")]
+mod dialog_parent;
+#[cfg(target_os = "linux")]
 mod login_linux;
 #[cfg(target_os = "linux")]
 pub use login_linux::LoginView;

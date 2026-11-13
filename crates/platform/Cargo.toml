@@ -31,7 +31,7 @@ symphonia = { version = "=0.6.1", default-features = false, features = ["aac"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 wayland-backend = { version = "=0.3.17", features = ["client_system", "dlopen"] }
 wayland-client = "=0.31.15"
-wayland-protocols = { version = "=0.32.13", features = ["client", "staging"] }
+wayland-protocols = { version = "=0.32.13", features = ["client", "staging", "unstable"] }
 x11-dl = "=2.21.0"
 ksni = "=0.3.6"
 zbus = { version = "=5.19.0", default-features = false, features = ["tokio", "blocking-api"] }
@@ -40,6 +40,8 @@ zbus-secret-service-keyring-store = { version = "=1.0.1", features = ["crypto-ru
 ashpd = { version = "=0.13.13", default-features = false, features = ["tokio", "global_shortcuts", "settings"] }
 futures-util.workspace = true
 gtk4 = { version = "=0.11.5", features = ["v4_10"] }
+# Imports Serein's exported toplevel so login/verification open as its dialogs.
+gdk4-wayland = { version = "=0.11.5", features = ["v4_10"] }
 webkit6 = "=0.6.1"
 
 [lints.rust]
@@ -79,3 +81,7 @@ keyring.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# dialog_parent example: a bare Wayland winit window.
+winit = { workspace = true, features = ["wayland", "wayland-dlopen"] }

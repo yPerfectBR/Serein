@@ -74,6 +74,8 @@ pub struct LoginView {
 	cancel: gio::Cancellable,
 	take_script: String,
 	wake: Arc<dyn Fn() + Send + Sync>,
+	// Dropped after the window: revokes the xdg-foreign export of Serein's window.
+	_parent: Option<crate::dialog_parent::ExportedParent>,
 }
 
 impl LoginView {
@@ -306,8 +308,8 @@ impl LoginView {
 			}
 			notify();
 		});
-		// GTK owns its standalone window; no foreign winit/raw-handle embedding.
-		let _ = parent;
+		// GTK owns its window; on Wayland it is parented to Serein's through xdg-foreign.
+		let parent = crate::dialog_parent::attach(&window, parent);
 		view.load_uri("https://discord.com/login");
 		window.present();
 		let display = gtk4::prelude::WidgetExt::display(&window);
@@ -320,6 +322,7 @@ impl LoginView {
 			cancel,
 			take_script,
 			wake,
+			_parent: parent,
 		})
 	}
 

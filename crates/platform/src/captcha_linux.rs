@@ -54,6 +54,8 @@ pub struct CaptchaView {
 	cancel: gio::Cancellable,
 	take_script: String,
 	wake: Arc<dyn Fn() + Send + Sync>,
+	// Dropped after the window: revokes the xdg-foreign export of Serein's window.
+	_parent: Option<crate::dialog_parent::ExportedParent>,
 }
 
 impl CaptchaView {
@@ -220,8 +222,8 @@ impl CaptchaView {
 			}
 			notify();
 		});
-		// GTK owns its standalone window; no foreign winit/raw-handle embedding.
-		let _ = parent;
+		// GTK owns its window; on Wayland it is parented to Serein's through xdg-foreign.
+		let parent = crate::dialog_parent::attach(&window, parent);
 		view.load_html(&html, Some(PAGE));
 		window.present();
 		Ok(Self {
@@ -233,6 +235,7 @@ impl CaptchaView {
 			cancel,
 			take_script,
 			wake,
+			_parent: parent,
 		})
 	}
 
