@@ -69,6 +69,11 @@ general-gpu-restart = Entra em vigor na próxima vez que Serein for iniciado.
 general-gpu-current-prefix = Atualmente desenhando com
 general-steady-refresh-rate = Taxa de atualização estável
 general-steady-refresh-rate-description = Enquanto Serein é a janela ativa, desenha na taxa de atualização da tela, para que telas com taxa de atualização variável (VRR, G-SYNC, FreeSync) possam manter uma única taxa em vez de piscar. Consome mais energia.
+steady-refresh-prompt-title = Tela G-SYNC detectada
+steady-refresh-prompt-body = Serein só redesenha quando algo muda, o que pode fazer uma tela G-SYNC piscar enquanto Serein é a janela ativa. A taxa de atualização estável evita isso desenhando na taxa de atualização da tela, mas consome mais energia. Ativar?
+steady-refresh-prompt-turn-on = Ativar
+steady-refresh-prompt-keep-off = Não, obrigado
+steady-refresh-prompt-settings = Você pode mudar isso depois nas configurações, em { $page } > { $group }.
 gpu-automatic = Automático
 gpu-high-performance = Alto desempenho
 gpu-power-saving = Economia de energia
@@ -4109,6 +4114,10 @@ verification-show-one-quick-check = Uma verificação rápida
 verification-show-verification-required = Verificação necessária
 # Context: show
 verification-show-verify = Verificar
+# Context: show
+verification-show-safer-in-the-official-discord-app = É mais seguro concluir esta verificação no aplicativo oficial do Discord. Após uma verificação resolvida no Serein, o Discord pode pedir que contas recentes verifiquem um número de telefone.
+# Context: show
+verification-show-open-discord = Abrir o Discord
 
 ## crates/ui/src/video.rs
 # Context: show_player
@@ -4622,6 +4631,11 @@ profiles-board-empty = No games on this board yet.
 profiles-board-show-more = Show more
 profiles-board-show-less = Show less
 profiles-activity-empty = Nenhuma atividade compartilhada.
+profiles-in-voice-server = em { $server }
+profiles-in-voice-join = Entrar
+profiles-in-voice-joined = Você já está neste canal de voz.
+profiles-in-voice-failed = Dispense a chamada que falhou e entre novamente.
+profiles-in-voice-unavailable = Não é possível entrar neste canal de voz agora.
 profiles-mutuals-empty = Nothing to show here.
 
 reading-double-click-reaction = Double-click reaction
@@ -4957,3 +4971,33 @@ new-message-hint = Adicione amigos para iniciar uma mensagem direta ou um grupo.
 new-message-no-people-found = Ninguém corresponde a essa pesquisa.
 new-message-create = Criar mensagem
 new-message-cancel = Cancelar
+# Context: moderation
+moderation-menu-timeout = Colocar { $name } de castigo
+# Context: moderation
+moderation-menu-kick = Expulsar { $name }
+# Context: moderation
+moderation-menu-ban = Banir { $name }
+# Context: moderation
+moderation-timeout-detail = A pessoa não poderá enviar mensagens, reagir nem entrar em canais de voz até o castigo terminar.
+# Context: moderation
+moderation-kick-detail = A pessoa poderá voltar com um novo convite.
+# Context: moderation
+moderation-ban-detail = A pessoa não poderá voltar até que o banimento seja removido.
+# Context: moderation
+moderation-duration-60-seconds = 60 segundos
+# Context: moderation
+moderation-remove-timeout = Remover castigo
+# Context: moderation
+moderation-delete-history = Excluir histórico de mensagens
+# Context: moderation
+moderation-delete-none = Não excluir nada
+# Context: moderation
+moderation-delete-hour = Última hora
+# Context: moderation
+moderation-delete-day = Últimas 24 horas
+# Context: moderation
+moderation-delete-week = Últimos 7 dias
+# Context: moderation
+moderation-confirm-timeout = Castigar
+# Context: moderation
+moderation-confirm-ban = Banir

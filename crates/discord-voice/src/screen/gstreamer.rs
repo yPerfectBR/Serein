@@ -13,26 +13,81 @@ const INVALID: &str = "Screen capture returned an unsupported frame";
 const UNAVAILABLE: &str = "Screen capture or encoder is unavailable";
 const MAX_SOURCE_BYTES: usize = 7680 * 4320 * 4;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// The hardware encoder family the installed GPU can drive. It decides which mode is tried
+/// first: xdg-desktop-portal-cosmic offers only DMA-BUF, and a stream whose first attempt
+/// cannot negotiate stops delivering pictures to every later attempt on the same session.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Gpu {
+	Nvidia,
+	Va,
+	Other,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Mode {
 	Va,
+	VaCopy,
 	VaLegacy,
 	Nvidia,
 	NvidiaCopy,
 	Software,
 }
 impl Mode {
-	pub(super) const ALL: [Self; 5] = [
+	pub(super) const ALL: [Self; 6] = [
 		Self::Va,
+		Self::VaCopy,
 		Self::VaLegacy,
 		Self::Nvidia,
 		Self::NvidiaCopy,
 		Self::Software,
 	];
-	/// The order encoders are tried in. `SEREIN_SCREEN_ENCODER` (`nvidia`, `nvidia-copy`, `va` or `software`) moves
-	/// that family first, for example to use a dedicated GPU instead of the integrated one.
-	pub(super) fn order() -> Vec<Self> {
-		let first: &[Self] = match std::env::var("SEREIN_SCREEN_ENCODER").ok().as_deref() {
+	/// Attempt order for the installed GPU. When `copy_first` is set (COSMIC, whose portal
+	/// stops a stream that fails to negotiate), the vendor's copy-based mode goes first:
+	/// importing the portal's DMA-BUF straight into vapostproc or EGL fails on portals that
+	/// only offer tiled/compressed formats, while a CPU copy into the same encoder works.
+	pub(super) fn order(gpu: Gpu, copy_first: bool) -> [Self; 6] {
+		if !copy_first {
+			return Self::ALL;
+		}
+		match gpu {
+			// The compositor usually renders on the integrated GPU, so VA-API goes first even
+			// when a discrete NVIDIA card is present.
+			Gpu::Va => [
+				Self::VaCopy,
+				Self::Va,
+				Self::VaLegacy,
+				Self::Nvidia,
+				Self::NvidiaCopy,
+				Self::Software,
+			],
+			Gpu::Nvidia => [
+				Self::NvidiaCopy,
+				Self::Nvidia,
+				Self::VaCopy,
+				Self::Va,
+				Self::VaLegacy,
+				Self::Software,
+			],
+			Gpu::Other => [
+				Self::VaCopy,
+				Self::NvidiaCopy,
+				Self::Va,
+				Self::Nvidia,
+				Self::VaLegacy,
+				Self::Software,
+			],
+		}
+	}
+	/// [`Self::order`] with `SEREIN_SCREEN_ENCODER` (`nvidia`, `nvidia-copy`, `va` or `software`)
+	/// moving that family first, for example to use a dedicated GPU instead of the integrated one.
+	pub(super) fn preferred(gpu: Gpu, copy_first: bool) -> Vec<Self> {
+		Self::with_preference(
+			Self::order(gpu, copy_first),
+			std::env::var("SEREIN_SCREEN_ENCODER").ok().as_deref(),
+		)
+	}
+	fn with_preference(base: [Self; 6], preference: Option<&str>) -> Vec<Self> {
+		let first: &[Self] = match preference {
 			Some("nvidia") => &[Self::Nvidia, Self::NvidiaCopy],
 			// Skips the GL path, which needs the encoder and the compositor on one GPU.
 			Some("nvidia-copy") => &[Self::NvidiaCopy],
@@ -41,13 +96,14 @@ impl Mode {
 			_ => &[],
 		};
 		let mut order = first.to_vec();
-		order.extend(Self::ALL.into_iter().filter(|mode| !first.contains(mode)));
+		order.extend(base.into_iter().filter(|mode| !first.contains(mode)));
 		order
 	}
 	pub(super) fn label(self) -> &'static str {
 		match self {
 			Self::Va => "H.264 · VA-API hardware encoding",
-			Self::VaLegacy => "H.264 · VA-API hardware encoding · CPU scaling",
+			Self::VaCopy => "H.264 · VA-API hardware encoding · CPU scaling",
+			Self::VaLegacy => "H.264 · VA-API hardware encoding · legacy plugin",
 			Self::Nvidia => "H.264 · NVENC hardware encoding",
 			Self::NvidiaCopy => "H.264 · NVENC hardware encoding · CPU scaling",
 			Self::Software => "H.264 · software encoding (higher CPU use)",
@@ -59,7 +115,9 @@ impl Mode {
 		match self {
 			Self::Va => true,
 			Self::Nvidia => false,
-			Self::VaLegacy | Self::NvidiaCopy | Self::Software => gst::version() >= (1, 29, 3, 0),
+			Self::VaCopy | Self::VaLegacy | Self::NvidiaCopy | Self::Software => {
+				gst::version() >= (1, 29, 3, 0)
+			}
 		}
 	}
 }
@@ -133,7 +191,7 @@ impl Capture {
 			),
 			// ponytail: CPU scaling avoids mixing VAMemory and legacy VASurface buffers;
 			// add legacy GPU postprocessing only if measured scaling cost warrants it.
-			Mode::VaLegacy => (
+			Mode::VaCopy | Mode::VaLegacy => (
 				format!("videoconvertscale add-borders=true ! video/x-raw,format=NV12,{size}"),
 				format!(
 					"videoconvertscale add-borders=true ! video/x-raw,format=BGRA,{preview_size}"
@@ -147,7 +205,7 @@ impl Capture {
 			),
 		};
 		let encoder = match mode {
-			Mode::Va => format!(
+			Mode::Va | Mode::VaCopy => format!(
 				"vah264enc name=encoder rate-control=cbr bitrate={} key-int-max={} b-frames=0",
 				bitrate / 1000,
 				settings.fps * 2
@@ -453,12 +511,20 @@ pub(super) fn raw(sample: &gst::Sample) -> Result<RawFrame, &'static str> {
 
 #[cfg(test)]
 mod order_tests {
-	use super::Mode;
+	use super::{Gpu, Mode};
 
 	#[test]
 	fn the_encoder_preference_moves_a_family_first_without_dropping_the_others() {
-		// The default keeps the documented order.
-		assert!(Mode::order() == Mode::ALL.to_vec());
+		let base = Mode::order(Gpu::Va, false);
+		// No preference keeps the GPU's order.
+		assert_eq!(Mode::with_preference(base, None), base.to_vec());
+		assert_eq!(Mode::with_preference(base, Some("unknown")), base.to_vec());
+		let nvidia = Mode::with_preference(base, Some("nvidia"));
+		assert_eq!(nvidia[..2], [Mode::Nvidia, Mode::NvidiaCopy]);
+		assert_eq!(nvidia.len(), Mode::ALL.len());
+		for mode in Mode::ALL {
+			assert!(nvidia.contains(&mode), "{mode:?}");
+		}
 	}
 }
 
@@ -575,6 +641,26 @@ mod tests {
 			frames >= 4,
 			"only {frames} pictures reached the encoder sink"
 		);
+	}
+
+	/// A portal that only offers DMA-BUF stops its stream when the first attempt cannot
+	/// negotiate, so COSMIC has to start with the vendor's copy-based encoder; other
+	/// desktops keep the zero-copy order that costs less CPU.
+	#[test]
+	fn the_first_attempt_matches_the_gpu() {
+		assert_eq!(Mode::order(Gpu::Va, true)[0], Mode::VaCopy);
+		assert_eq!(Mode::order(Gpu::Nvidia, true)[0], Mode::NvidiaCopy);
+		assert_eq!(Mode::order(Gpu::Other, true)[0], Mode::VaCopy);
+		assert_eq!(Mode::order(Gpu::Va, false)[0], Mode::Va);
+		for copy_first in [true, false] {
+			for gpu in [Gpu::Va, Gpu::Nvidia, Gpu::Other] {
+				let order = Mode::order(gpu, copy_first);
+				assert_eq!(order.last(), Some(&Mode::Software), "{gpu:?}");
+				for mode in Mode::ALL {
+					assert!(order.contains(&mode), "{mode:?} missing for {gpu:?}");
+				}
+			}
+		}
 	}
 
 	/// The logged Hyprland format had no pixel aspect, and pipewiresrc's fixation of the

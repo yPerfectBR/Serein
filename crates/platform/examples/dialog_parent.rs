@@ -134,7 +134,7 @@ impl ApplicationHandler for Probe {
 			let challenge =
 				client_core::captcha::Challenge::new(TEST_SITEKEY.into(), None, None, None, false)
 					.expect("challenge");
-			match platform::captcha::CaptchaView::open(window, &challenge, true, || {}) {
+			match platform::captcha::CaptchaView::open(window, &challenge, true, None, || {}) {
 				Ok(view) => self.captcha = Some(view),
 				Err(error) => {
 					eprintln!("probe: verification window failed: {error}");

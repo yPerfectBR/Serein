@@ -12,6 +12,13 @@ Voice is included in every build without a feature flag. Source builds require C
 
 ## Implemented behavior and limits
 
+Hover over the connection icon in the account card to see the latest voice ping.
+Click the icon for the latest and average RTT and a chart of up to 24 recent samples.
+RTT measures the existing voice WebSocket heartbeat and matching ACK. Audio packet
+loss and end-to-end audio delay are separate measurements. Samples stay in memory
+and reset on reconnect or when leaving the call. The synthetic preview is
+`cargo run --locked --features demo -- --demo --demo-voice`.
+
 Resizing the DM or group call stage keeps a conversation following the newest message
 anchored above its composer on every frame. Reading older messages retains the existing
 scroll position instead of forcing the conversation back to the newest message.
@@ -196,7 +203,12 @@ An authenticated empty room displays “Connected · waiting for others”; audi
 
 Hovering a participant marked LIVE opens a compact still preview when Discord supplies one.
 **Watch Stream** joins that voice channel when no call is active, then starts the existing
-receive-only stream path after the call connects. It never silently switches an active call;
+receive-only stream path after the call connects. Starting to watch also opens that channel's
+stage with the share enlarged, so the stream is visible instead of playing behind another
+conversation. The preview card keeps its anchor while the image loads, and the preview frame
+itself is a watch target with a hover label. Your own live share is labelled “You’re streaming”
+with its action disabled. Multiple live participants in the same channel keep independent cards,
+and moving the pointer into a card keeps it open. It never silently switches an active call;
 hidden or unavailable previews remain explicit. The preview request requires current roster
 state plus VIEW_CHANNEL and CONNECT. This normal-user route remains unofficial and live-unverified.
 
@@ -492,9 +504,17 @@ request aborting capture startup. Native Windows verification of this correction
 
 Linux uses the desktop ScreenCast portal and PipeWire. Share Screen opens the system
 screen/window picker after the quality dialog; source discovery never opens that picker.
-The default is 720p30. The worker tries modern VA-API, legacy VA-API with CPU scaling,
-NVENC with GPU scaling, NVENC with CPU scaling, then the existing OpenH264 software
-encoder. The call stage identifies the active encoder and software fallback.
+The default is 720p30. In a COSMIC session the worker reads the DRM vendor of the installed
+GPUs and tries the copy-based mode for that vendor first — VA-API with `videoconvertscale`
+on Intel and AMD, NVENC with CPU scaling on NVIDIA — then its zero-copy variant, the other
+vendor's modes, the legacy `vaapih264enc` path, and finally the OpenH264 software encoder.
+A hybrid system prefers VA-API because the compositor usually renders on the integrated GPU.
+The copy has to lead there because xdg-desktop-portal-cosmic offers only DMA-BUF with a
+tiled or compressed modifier: importing those straight into `vapostproc` or EGL fails to
+negotiate, and that portal then stops delivering pictures to every later attempt on the same
+session, which appeared as a permanently black share. Other desktops keep the zero-copy
+order, so they pay neither the copy nor the risk. The call stage identifies the active
+encoder and software fallback.
 On Niri, portal frames receive pipeline running-time timestamps before frame-rate
 filtering. This handles Niri 26.04's constant presentation timestamps, which otherwise
 freeze the preview and prevent video from reaching a viewer who joins later. Detection
@@ -531,7 +551,9 @@ window; cancelling or failing the portal never selects it automatically. The exi
 remains unverified. AV1/H.265 sending is not included.
 
 The legacy fallback requires an available `vaapih264enc` from GStreamer VAAPI;
-`vapostproc` alone does not supply it. It uploads CPU-scaled NV12 frames to the
+`vapostproc` alone does not supply it. Upstream deleted `gstreamer-vaapi` in June 2025 and
+replaced it with the `va` plugin's `vah264enc`, so the legacy mode only helps older
+installs. It uploads CPU-scaled NV12 frames to the
 hardware encoder, so some CPU use remains expected. No legacy plugin or driver is
 installed automatically. Missing or failing encoders continue through the existing
 fallback sequence. Haswell/i965 encoding and live Discord delivery remain unverified.

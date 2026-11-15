@@ -69,6 +69,11 @@ general-gpu-restart = 下次启动 Serein 时生效。
 general-gpu-current-prefix = 目前绘制使用
 general-steady-refresh-rate = 固定刷新率
 general-steady-refresh-rate-description = 当 Serein 是活动窗口时，会以显示器的刷新率绘制，让可变刷新率（VRR、G-SYNC、FreeSync）显示器可以保持同一刷新率而不会闪烁。会更耗电。
+steady-refresh-prompt-title = 检测到 G-SYNC 显示器
+steady-refresh-prompt-body = Serein 只在内容变化时重新绘制，因此当 Serein 是活动窗口时，G-SYNC 显示器可能会闪烁。固定刷新率会以显示器的刷新率绘制来避免闪烁，但会更耗电。要开启吗？
+steady-refresh-prompt-turn-on = 开启
+steady-refresh-prompt-keep-off = 不用了
+steady-refresh-prompt-settings = 之后可以在设置的 { $page } > { $group } 中更改。
 gpu-automatic = 自动
 gpu-high-performance = 高性能
 gpu-power-saving = 省电
@@ -4130,6 +4135,10 @@ verification-show-one-quick-check = 一次快速检查
 verification-show-verification-required = 需要验证
 # Context: show
 verification-show-verify = 验证
+# Context: show
+verification-show-safer-in-the-official-discord-app = 在官方 Discord 应用中完成此验证更安全。在 Serein 中完成验证后，Discord 可能会要求较新的账户验证手机号码。
+# Context: show
+verification-show-open-discord = 打开 Discord
 
 ## crates/ui/src/video.rs
 # Context: show_player
@@ -4710,6 +4719,11 @@ profiles-board-empty = 这个看板目前还没有游戏。
 profiles-board-show-more = 查看更多
 profiles-board-show-less = 收起
 profiles-activity-empty = 暂无共享活动。
+profiles-in-voice-server = 位于 { $server }
+profiles-in-voice-join = 加入
+profiles-in-voice-joined = 你已在此语音频道中。
+profiles-in-voice-failed = 请先关闭失败的通话，然后再重新加入。
+profiles-in-voice-unavailable = 你现在无法加入此语音频道。
 profiles-mutuals-empty = 这里没有可显示的内容。
 
 reading-double-click-reaction = 双击回应
@@ -4987,3 +5001,33 @@ new-message-hint = 添加好友以开始私信或群组。
 new-message-no-people-found = 没有匹配的结果。
 new-message-create = 创建消息
 new-message-cancel = 取消
+# Context: moderation
+moderation-menu-timeout = 禁言 { $name }
+# Context: moderation
+moderation-menu-kick = 移出 { $name }
+# Context: moderation
+moderation-menu-ban = 封禁 { $name }
+# Context: moderation
+moderation-timeout-detail = 禁言结束前，对方无法发送消息、添加反应或加入语音频道。
+# Context: moderation
+moderation-kick-detail = 对方可以通过新的邀请重新加入。
+# Context: moderation
+moderation-ban-detail = 封禁解除前，对方无法重新加入。
+# Context: moderation
+moderation-duration-60-seconds = 60 秒
+# Context: moderation
+moderation-remove-timeout = 解除禁言
+# Context: moderation
+moderation-delete-history = 删除消息记录
+# Context: moderation
+moderation-delete-none = 不删除
+# Context: moderation
+moderation-delete-hour = 过去 1 小时
+# Context: moderation
+moderation-delete-day = 过去 24 小时
+# Context: moderation
+moderation-delete-week = 过去 7 天
+# Context: moderation
+moderation-confirm-timeout = 禁言
+# Context: moderation
+moderation-confirm-ban = 封禁

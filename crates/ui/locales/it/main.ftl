@@ -69,6 +69,11 @@ general-gpu-restart = Ha effetto al successivo avvio di Serein.
 general-gpu-current-prefix = Attualmente disegno con
 general-steady-refresh-rate = Frequenza di aggiornamento costante
 general-steady-refresh-rate-description = Finché Serein è la finestra attiva, disegna alla frequenza di aggiornamento del display, così i display a frequenza di aggiornamento variabile (VRR, G-SYNC, FreeSync) possono mantenere una sola frequenza invece di sfarfallare. Consuma più energia.
+steady-refresh-prompt-title = Rilevato display G-SYNC
+steady-refresh-prompt-body = Serein ridisegna solo quando qualcosa cambia, e questo può far sfarfallare un display G-SYNC finché Serein è la finestra attiva. La frequenza di aggiornamento costante lo evita disegnando alla frequenza di aggiornamento del display, ma consuma più energia. Attivarla?
+steady-refresh-prompt-turn-on = Attiva
+steady-refresh-prompt-keep-off = No, grazie
+steady-refresh-prompt-settings = Puoi cambiare questa scelta più tardi nelle impostazioni, in { $page } > { $group }.
 gpu-automatic = Automatico
 gpu-high-performance = Prestazioni elevate
 gpu-power-saving = Risparmio energetico
@@ -4098,6 +4103,10 @@ verification-show-one-quick-check = Un rapido controllo
 verification-show-verification-required = Verifica richiesta
 # Context: show
 verification-show-verify = Verificare
+# Context: show
+verification-show-safer-in-the-official-discord-app = È più sicuro completare questa verifica nell’app ufficiale di Discord. Dopo una verifica risolta in Serein, Discord può chiedere agli account recenti di verificare un numero di telefono.
+# Context: show
+verification-show-open-discord = Apri Discord
 
 ## crates/ui/src/video.rs
 # Context: show_player
@@ -4611,6 +4620,11 @@ profiles-board-empty = No games on this board yet.
 profiles-board-show-more = Show more
 profiles-board-show-less = Show less
 profiles-activity-empty = Nessuna attività condivisa.
+profiles-in-voice-server = in { $server }
+profiles-in-voice-join = Unisciti
+profiles-in-voice-joined = Sei già in questo canale vocale.
+profiles-in-voice-failed = Chiudi prima la chiamata non riuscita, poi unisciti di nuovo.
+profiles-in-voice-unavailable = Al momento non puoi unirti a questo canale vocale.
 profiles-mutuals-empty = Nothing to show here.
 
 reading-double-click-reaction = Double-click reaction
@@ -4890,3 +4904,33 @@ new-message-hint = Aggiungi amici per avviare un messaggio diretto o un gruppo.
 new-message-no-people-found = Nessuno corrisponde a questa ricerca.
 new-message-create = Crea messaggio
 new-message-cancel = Annulla
+# Context: moderation
+moderation-menu-timeout = Metti in timeout { $name }
+# Context: moderation
+moderation-menu-kick = Espelli { $name }
+# Context: moderation
+moderation-menu-ban = Banna { $name }
+# Context: moderation
+moderation-timeout-detail = Non potrà inviare messaggi, reagire o entrare nei canali vocali fino al termine del timeout.
+# Context: moderation
+moderation-kick-detail = Potrà rientrare con un nuovo invito.
+# Context: moderation
+moderation-ban-detail = Non potrà rientrare finché il ban non viene rimosso.
+# Context: moderation
+moderation-duration-60-seconds = 60 secondi
+# Context: moderation
+moderation-remove-timeout = Rimuovi timeout
+# Context: moderation
+moderation-delete-history = Elimina cronologia messaggi
+# Context: moderation
+moderation-delete-none = Non eliminare nulla
+# Context: moderation
+moderation-delete-hour = Ultima ora
+# Context: moderation
+moderation-delete-day = Ultime 24 ore
+# Context: moderation
+moderation-delete-week = Ultimi 7 giorni
+# Context: moderation
+moderation-confirm-timeout = Timeout
+# Context: moderation
+moderation-confirm-ban = Banna

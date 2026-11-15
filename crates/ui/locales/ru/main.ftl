@@ -69,6 +69,11 @@ general-gpu-restart = Изменение этого параметра всту�
 general-gpu-current-prefix = Сейчас активна
 general-steady-refresh-rate = Постоянная частота обновления
 general-steady-refresh-rate-description = Пока окно Serein активно, отрисовка идёт с частотой обновления экрана, поэтому мониторы с переменной частотой обновления (VRR, G-SYNC, FreeSync) могут держать одну частоту и не мерцать. Расходует больше энергии.
+steady-refresh-prompt-title = Обнаружен дисплей с G-SYNC
+steady-refresh-prompt-body = Serein перерисовывает окно только при изменениях, из-за чего дисплей с G-SYNC может мерцать, пока окно Serein активно. Постоянная частота обновления устраняет это, отрисовывая с частотой обновления экрана, но расходует больше энергии. Включить её?
+steady-refresh-prompt-turn-on = Включить
+steady-refresh-prompt-keep-off = Нет, спасибо
+steady-refresh-prompt-settings = Это можно изменить позже в настройках: { $page } > { $group }.
 gpu-automatic = Автоматический
 gpu-high-performance = Высокая производительность
 gpu-power-saving = Экономия энергии
@@ -4102,6 +4107,10 @@ verification-show-one-quick-check = Одна быстрая проверка
 verification-show-verification-required = Требуется проверка
 # Context: show
 verification-show-verify = Проверять
+# Context: show
+verification-show-safer-in-the-official-discord-app = Безопаснее пройти эту проверку в официальном приложении Discord. После проверки, пройденной в Serein, Discord может попросить новые аккаунты подтвердить номер телефона.
+# Context: show
+verification-show-open-discord = Открыть Discord
 
 ## crates/ui/src/video.rs
 # Context: show_player
@@ -4224,6 +4233,13 @@ voice-voice-card-section-dismiss-call = Отклонить вызов
 voice-voice-card-section-reconnect-attempt = { $reason } · попытка { $attempt } из { $total }
 # Context: voice_card_section
 voice-voice-card-section-reconnecting = Переподключение…
+
+voice-connection-title = Соединение
+voice-connection-ping-value = { $millis } мс
+voice-connection-ping-pending = Ожидание первого замера…
+voice-connection-average-ping = Средний пинг: { $value }
+voice-connection-last-ping = Последний пинг: { $value }
+voice-connection-ping-description = Время ответа сервера управления голосовым соединением.
 # Context: voice_card_section
 voice-voice-card-section-microphone-unavailable-a-still-connected-choose-another-input-in-audio = Микрофон недоступен · все еще подключен. Выберите другой вход в настройках звука.
 # Context: voice_channel_button
@@ -4617,6 +4633,11 @@ profiles-board-empty = No games on this board yet.
 profiles-board-show-more = Show more
 profiles-board-show-less = Show less
 profiles-activity-empty = Нет опубликованной активности.
+profiles-in-voice-server = на сервере { $server }
+profiles-in-voice-join = Присоединиться
+profiles-in-voice-joined = Вы уже в этом голосовом канале.
+profiles-in-voice-failed = Сначала закройте неудавшийся звонок, затем присоединитесь снова.
+profiles-in-voice-unavailable = Сейчас нельзя присоединиться к этому голосовому каналу.
 profiles-mutuals-empty = Nothing to show here.
 
 reading-double-click-reaction = Double-click reaction
@@ -4893,3 +4914,33 @@ new-message-hint = Добавьте друзей, чтобы начать лич
 new-message-no-people-found = Никто не найден.
 new-message-create = Создать сообщение
 new-message-cancel = Отмена
+# Context: moderation
+moderation-menu-timeout = Тайм-аут для { $name }
+# Context: moderation
+moderation-menu-kick = Выгнать { $name }
+# Context: moderation
+moderation-menu-ban = Забанить { $name }
+# Context: moderation
+moderation-timeout-detail = До конца тайм-аута участник не сможет отправлять сообщения, ставить реакции и заходить в голосовые каналы.
+# Context: moderation
+moderation-kick-detail = Участник сможет вернуться по новому приглашению.
+# Context: moderation
+moderation-ban-detail = Участник не сможет вернуться, пока бан не снят.
+# Context: moderation
+moderation-duration-60-seconds = 60 секунд
+# Context: moderation
+moderation-remove-timeout = Снять тайм-аут
+# Context: moderation
+moderation-delete-history = Удалить историю сообщений
+# Context: moderation
+moderation-delete-none = Ничего не удалять
+# Context: moderation
+moderation-delete-hour = Последний час
+# Context: moderation
+moderation-delete-day = Последние 24 часа
+# Context: moderation
+moderation-delete-week = Последние 7 дней
+# Context: moderation
+moderation-confirm-timeout = Тайм-аут
+# Context: moderation
+moderation-confirm-ban = Забанить

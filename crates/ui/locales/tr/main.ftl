@@ -69,6 +69,11 @@ general-gpu-restart = Serein'in bir sonraki başlangıcında etkili olur.
 general-gpu-current-prefix = Şu anda çizim yapıyorum
 general-steady-refresh-rate = Sabit yenileme hızı
 general-steady-refresh-rate-description = Serein etkin pencereyken ekranın yenileme hızında çizer; böylece değişken yenileme hızlı (VRR, G-SYNC, FreeSync) ekranlar titremek yerine tek bir hızda kalabilir. Daha fazla güç tüketir.
+steady-refresh-prompt-title = G-SYNC ekran algılandı
+steady-refresh-prompt-body = Serein yalnızca bir şey değiştiğinde yeniden çizer; bu da Serein etkin pencereyken G-SYNC ekranın titremesine yol açabilir. Sabit yenileme hızı, ekranın yenileme hızında çizerek bunu önler ancak daha fazla güç tüketir. Açılsın mı?
+steady-refresh-prompt-turn-on = Aç
+steady-refresh-prompt-keep-off = Hayır, teşekkürler
+steady-refresh-prompt-settings = Bunu daha sonra ayarlarda { $page } > { $group } bölümünden değiştirebilirsiniz.
 gpu-automatic = Otomatik
 gpu-high-performance = Yüksek performans
 gpu-power-saving = Güç tasarrufu
@@ -4092,6 +4097,10 @@ verification-show-one-quick-check = Hızlı bir kontrol
 verification-show-verification-required = Doğrulama gerekli
 # Context: show
 verification-show-verify = Doğrulamak
+# Context: show
+verification-show-safer-in-the-official-discord-app = Bu doğrulamayı resmi Discord uygulamasında tamamlamak daha güvenlidir. Serein'de çözülen bir doğrulamadan sonra Discord, yeni hesaplardan telefon numarası doğrulaması isteyebilir.
+# Context: show
+verification-show-open-discord = Discord'u aç
 
 ## crates/ui/src/video.rs
 # Context: show_player
@@ -4600,6 +4609,11 @@ profiles-board-empty = No games on this board yet.
 profiles-board-show-more = Show more
 profiles-board-show-less = Show less
 profiles-activity-empty = Paylaşılan etkinlik yok.
+profiles-in-voice-server = { $server } sunucusunda
+profiles-in-voice-join = Katıl
+profiles-in-voice-joined = Zaten bu ses kanalındasınız.
+profiles-in-voice-failed = Önce başarısız aramayı kapatın, sonra yeniden katılın.
+profiles-in-voice-unavailable = Şu anda bu ses kanalına katılamazsınız.
 profiles-mutuals-empty = Nothing to show here.
 
 reading-double-click-reaction = Double-click reaction
@@ -4876,3 +4890,33 @@ new-message-hint = Bir doğrudan mesaj veya grup başlatmak için arkadaş ekley
 new-message-no-people-found = Bu aramayla eşleşen kimse yok.
 new-message-create = Mesaj Oluştur
 new-message-cancel = İptal
+# Context: moderation
+moderation-menu-timeout = { $name } için zaman aşımı
+# Context: moderation
+moderation-menu-kick = { $name } kullanıcısını at
+# Context: moderation
+moderation-menu-ban = { $name } kullanıcısını yasakla
+# Context: moderation
+moderation-timeout-detail = Zaman aşımı bitene kadar mesaj gönderemez, tepki ekleyemez ve ses kanallarına katılamaz.
+# Context: moderation
+moderation-kick-detail = Yeni bir davetle tekrar katılabilir.
+# Context: moderation
+moderation-ban-detail = Yasak kaldırılana kadar tekrar katılamaz.
+# Context: moderation
+moderation-duration-60-seconds = 60 saniye
+# Context: moderation
+moderation-remove-timeout = Zaman aşımını kaldır
+# Context: moderation
+moderation-delete-history = Mesaj geçmişini sil
+# Context: moderation
+moderation-delete-none = Hiçbirini silme
+# Context: moderation
+moderation-delete-hour = Son bir saat
+# Context: moderation
+moderation-delete-day = Son 24 saat
+# Context: moderation
+moderation-delete-week = Son 7 gün
+# Context: moderation
+moderation-confirm-timeout = Zaman aşımı
+# Context: moderation
+moderation-confirm-ban = Yasakla

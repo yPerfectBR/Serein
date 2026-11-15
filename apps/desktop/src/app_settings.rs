@@ -63,6 +63,7 @@ impl Settings {
 			gpu_preference: ui.gpu_preference,
 			graphics_api: ui.graphics_api,
 			steady_refresh_rate: ui.steady_refresh_rate,
+			steady_refresh_prompted: ui.steady_refresh_prompted,
 			primary_color: ui.primary_color,
 			transparency_blur: ui.transparency_blur,
 			transparency: ui.transparency,
@@ -84,7 +85,6 @@ impl Settings {
 			cosmetics: ui.cosmetics,
 			image_cache: ui.image_cache,
 			time_format: ui.time_format,
-			plaintext_login: ui.plaintext_login,
 			diagnostics_log: ui.diagnostics_log,
 			setup_done: !ui.setup_pending,
 		};
@@ -118,6 +118,8 @@ impl Settings {
 		ui.gpu_preference = value.gpu_preference;
 		ui.graphics_api = value.graphics_api;
 		ui.steady_refresh_rate = value.steady_refresh_rate;
+		// Like setup below: unreadable preferences must not ask again on every launch.
+		ui.steady_refresh_prompted = !self.loaded || value.steady_refresh_prompted;
 		ui.primary_color = value.primary_color;
 		ui.transparency_blur = value.transparency_blur;
 		ui.transparency = value.transparency;
@@ -139,7 +141,6 @@ impl Settings {
 		ui.cosmetics = value.cosmetics;
 		ui.image_cache = value.image_cache;
 		ui.time_format = value.time_format;
-		ui.plaintext_login = value.plaintext_login;
 		ui.diagnostics_log = value.diagnostics_log;
 		// Unreadable preferences fall back to defaults; never nag with setup on every launch.
 		ui.setup_pending = self.loaded && !value.setup_done;

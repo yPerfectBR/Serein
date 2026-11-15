@@ -1721,6 +1721,15 @@ fn deleted_message_actions(popup: egui::Popup<'_>, action: &mut Option<DeletedLo
 		}
 	});
 }
+/// Whether the first paragraph's first strong character reads right to left (bidi P2).
+fn starts_rtl(text: &str) -> bool {
+	use unicode_bidi::BidiClass::{AL, B, L, R};
+	text.chars()
+		.map(unicode_bidi::bidi_class)
+		.find(|class| matches!(class, L | R | AL | B))
+		.is_some_and(|class| matches!(class, R | AL))
+}
+
 /// Fills a message's action menu, including plugin message actions, and records the chosen
 /// plugin action with the message it applies to.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -4345,6 +4354,15 @@ impl TimelineView {
 					// A group start's toolbar rises into the gap above it but stops short of the
 					// previous message, as in Discord.
 					let toolbar_top = rect.top() - if compact { 10.0 } else { 12.0 };
+					// Right-aligned RTL text starts under the toolbar on a headerless row,
+					// so the toolbar sits fully above it there.
+					let toolbar_top = if compact && starts_rtl(&message.content) {
+						(rect.top() - 27.0)
+							.max(ui.clip_rect().top())
+							.min(toolbar_top)
+					} else {
+						toolbar_top
+					};
 					let double_click = double_click.filter(|pos| {
 						!deleted
 							&& rect.contains(*pos)
@@ -5873,6 +5891,7 @@ mod tests {
 			older_exhausted: false,
 			selected: Some(Id(20)),
 			channels: vec![model::Channel {
+				user_limit: None,
 				id: Id(20),
 				guild: None,
 				parent_id: None,
@@ -6142,6 +6161,7 @@ mod tests {
 			state.history_after = None;
 			state.older_exhausted = true;
 			state.channels = vec![model::Channel {
+				user_limit: None,
 				id: Id(20),
 				guild: None,
 				parent_id: None,
@@ -7201,6 +7221,7 @@ mod tests {
 				request,
 				result: Ok(client_core::thread_previews::Loaded {
 					channel: Some(model::Channel {
+						user_limit: None,
 						id: thread,
 						guild: Some(Id(10)),
 						parent_id: Some(parent),
@@ -7941,6 +7962,7 @@ mod tests {
 				selected: Some(Id(20)),
 				search_target: Some(Id(19)),
 				channels: vec![model::Channel {
+					user_limit: None,
 					id: Id(20),
 					guild: None,
 					parent_id: None,
@@ -8074,6 +8096,7 @@ mod tests {
 		let channels = [(10, 1), (11, 1), (20, 2)]
 			.into_iter()
 			.map(|(id, guild)| model::Channel {
+				user_limit: None,
 				id: Id(id),
 				guild: Some(Id(guild)),
 				parent_id: None,
@@ -8351,6 +8374,7 @@ mod tests {
 				older_exhausted,
 				selected: Some(Id(20)),
 				channels: vec![model::Channel {
+					user_limit: None,
 					id: Id(20),
 					guild: None,
 					parent_id: None,
@@ -8451,6 +8475,7 @@ mod tests {
 			older_exhausted: true,
 			selected: Some(Id(20)),
 			channels: vec![model::Channel {
+				user_limit: None,
 				id: Id(20),
 				guild: None,
 				parent_id: None,
@@ -8555,6 +8580,7 @@ mod tests {
 			older_exhausted: true,
 			selected: Some(Id(20)),
 			channels: vec![model::Channel {
+				user_limit: None,
 				id: Id(20),
 				guild: None,
 				parent_id: None,
@@ -8795,6 +8821,7 @@ mod tests {
 			freshness: model::Freshness::Fresh,
 			selected: Some(Id(20)),
 			channels: vec![model::Channel {
+				user_limit: None,
 				id: Id(20),
 				guild: None,
 				parent_id: None,
@@ -10019,6 +10046,7 @@ mod tests {
 			..Default::default()
 		};
 		state.channels.push(model::Channel {
+			user_limit: None,
 			id: Id(4),
 			guild: Some(Id(5)),
 			name: "a".into(),
@@ -10109,6 +10137,7 @@ mod tests {
 		state.apply(client_core::Envelope {
 			generation: state.generation,
 			event: client_core::Event::ChannelChanged(model::ChannelPatch {
+				user_limit: model::Patch::Absent,
 				id: Id(4),
 				name: model::Patch::Value("a-much-longer-channel-reference".into()),
 				last_message: model::Patch::Absent,
@@ -10718,6 +10747,7 @@ mod tests {
 			older_exhausted: true,
 			freshness: model::Freshness::Fresh,
 			channels: vec![model::Channel {
+				user_limit: None,
 				id: Id(channel),
 				guild: None,
 				parent_id: None,

@@ -69,6 +69,11 @@ general-gpu-restart = 次回セレイン起動時に有効となります。
 general-gpu-current-prefix = 現在絵を描いているのは
 general-steady-refresh-rate = リフレッシュレートを固定
 general-steady-refresh-rate-description = Serein がアクティブなウィンドウの間は、ディスプレイのリフレッシュレートで描画するため、可変リフレッシュレート (VRR、G-SYNC、FreeSync) のディスプレイでもちらつかずに一定のレートを保てます。消費電力が増えます。
+steady-refresh-prompt-title = G-SYNC ディスプレイを検出しました
+steady-refresh-prompt-body = Serein は変化があったときだけ再描画するため、Serein がアクティブなウィンドウの間、G-SYNC ディスプレイがちらつくことがあります。「リフレッシュレートを固定」をオンにすると、ディスプレイのリフレッシュレートで描画してちらつきを防ぎますが、消費電力が増えます。オンにしますか？
+steady-refresh-prompt-turn-on = オンにする
+steady-refresh-prompt-keep-off = いいえ
+steady-refresh-prompt-settings = あとで設定の { $page } > { $group } から変更できます。
 gpu-automatic = 自動
 gpu-high-performance = 高性能
 gpu-power-saving = 省電力
@@ -4092,6 +4097,10 @@ verification-show-one-quick-check = 簡単なチェックを 1 つ
 verification-show-verification-required = 要検証
 # Context: show
 verification-show-verify = 確認する
+# Context: show
+verification-show-safer-in-the-official-discord-app = この確認は公式のDiscordアプリで行う方が安全です。Sereinで確認を完了すると、Discordが新しいアカウントに電話番号の認証を求めることがあります。
+# Context: show
+verification-show-open-discord = Discordを開く
 
 ## crates/ui/src/video.rs
 # Context: show_player
@@ -4597,6 +4606,11 @@ profiles-board-empty = No games on this board yet.
 profiles-board-show-more = Show more
 profiles-board-show-less = Show less
 profiles-activity-empty = 共有されているアクティビティはありません。
+profiles-in-voice-server = { $server } 内
+profiles-in-voice-join = 参加
+profiles-in-voice-joined = このボイスチャンネルに参加しています。
+profiles-in-voice-failed = 失敗した通話を閉じてから、もう一度参加してください。
+profiles-in-voice-unavailable = 現在このボイスチャンネルには参加できません。
 profiles-mutuals-empty = Nothing to show here.
 
 reading-double-click-reaction = Double-click reaction
@@ -4873,3 +4887,33 @@ new-message-hint = フレンドを追加して、DMまたはグループを開�
 new-message-no-people-found = 一致する相手はいません。
 new-message-create = メッセージを作成
 new-message-cancel = キャンセル
+# Context: moderation
+moderation-menu-timeout = { $name }をタイムアウト
+# Context: moderation
+moderation-menu-kick = { $name }をキック
+# Context: moderation
+moderation-menu-ban = { $name }をBAN
+# Context: moderation
+moderation-timeout-detail = タイムアウトが終わるまで、メッセージの送信、リアクション、ボイスチャンネルへの参加ができなくなります。
+# Context: moderation
+moderation-kick-detail = 新しい招待があれば再び参加できます。
+# Context: moderation
+moderation-ban-detail = BANが解除されるまで再び参加できません。
+# Context: moderation
+moderation-duration-60-seconds = 60秒
+# Context: moderation
+moderation-remove-timeout = タイムアウトを解除
+# Context: moderation
+moderation-delete-history = メッセージ履歴を削除
+# Context: moderation
+moderation-delete-none = 削除しない
+# Context: moderation
+moderation-delete-hour = 過去1時間
+# Context: moderation
+moderation-delete-day = 過去24時間
+# Context: moderation
+moderation-delete-week = 過去7日間
+# Context: moderation
+moderation-confirm-timeout = タイムアウト
+# Context: moderation
+moderation-confirm-ban = BAN
