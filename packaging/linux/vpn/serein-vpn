@@ -11,6 +11,7 @@ Used by Serein (Settings > Network > WireGuard) and usable from a terminal or sc
   serein-vpn status                           show the tunnel and its latest handshake
   serein-vpn down                             remove the namespace and tunnel
   serein-vpn ping                             succeed once the caller is authorised (for pkexec)
+  serein-vpn heal                             restart a stalled handshake on a new UDP source port
   serein-vpn check <wg.conf>                  validate a configuration without touching the system
 
 It needs root (use `sudo` or `pkexec`). Everything the command does, including voice and video
@@ -28,6 +29,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 NS = "serein-vpn"
 IFACE = "wg-serein"
@@ -38,6 +40,10 @@ ENV_ALLOWED = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ENV_DENIED = ("LD_", "SEREIN_VPN_")
 
 INTERFACE_KEYS = {"privatekey", "address", "dns", "mtu", "listenport"}
+# WireGuard renews the handshake every 2 minutes while packets flow (PersistentKeepalive keeps
+# them flowing), so an older one means the peer stopped answering this UDP flow.
+STALE_AFTER = 180
+HEAL_COOLDOWN = 150
 PEER_KEYS = {"publickey", "presharedkey", "endpoint", "allowedips", "persistentkeepalive"}
 
 
@@ -280,6 +286,51 @@ def status():
     return 0
 
 
+def handshake_age(now):
+    shown = sh("ip", "netns", "exec", NS, "wg", "show", IFACE, "latest-handshakes", capture=True, check=False)
+    fields = shown.stdout.split()
+    if shown.returncode != 0 or len(fields) < 2 or not fields[1].isdigit():
+        return None, None
+    stamp = int(fields[1])
+    return fields[0], (now - stamp if stamp else None)
+
+
+def heal(now=None):
+    """Moves a stalled tunnel to a new UDP source port.
+
+    A NAT mapping or peer session can die (router reboot, suspend, Wi-Fi roaming) while the kernel
+    keeps retrying the handshake from the same source port forever, which leaves Serein stuck on
+    "Reconnecting". A fresh port is a new flow for every middlebox; re-setting the endpoint also
+    re-resolves a hostname endpoint. Runs from serein-vpn-watchdog.timer; a no-op while healthy.
+    """
+    if not namespace_exists():
+        return 0
+    now = time.time() if now is None else now
+    peer, age = handshake_age(now)
+    if peer is None or (age is not None and age < STALE_AFTER):
+        return 0
+    marker = os.path.join(STATE_DIR, "healed")
+    try:
+        if now - os.path.getmtime(marker) < HEAL_COOLDOWN:
+            return 0
+    except OSError:
+        pass
+    try:
+        endpoint = open(os.path.join(STATE_DIR, "endpoint")).read().strip()
+    except OSError:
+        endpoint = ""
+    args = ["ip", "netns", "exec", NS, "wg", "set", IFACE, "listen-port", "0"]
+    if endpoint:
+        args += ["peer", peer, "endpoint", endpoint]
+    sh(*args)
+    os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
+    with open(marker, "w") as handle:
+        handle.write(f"{int(now)}\n")
+    print(f"serein-vpn: handshake {'never completed' if age is None else f'{int(age)}s old'}; "
+          f"moved the tunnel to a new source port")
+    return 0
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
@@ -294,6 +345,8 @@ def main(argv):
     if os.geteuid() != 0:
         raise Fail("must run as root (use sudo or pkexec)")
     leave_user_namespace_state()
+    if command == "heal":
+        return heal()
     entry = caller()
     if command == "ping":
         return 0
@@ -315,7 +368,7 @@ def main(argv):
     if command == "host":
         environment, run = split_command(argv[1:])
         exec_as_user(entry, [], environment, run, {})
-    raise Fail("usage: serein-vpn up|run|host|status|down|ping|check (see --help)")
+    raise Fail("usage: serein-vpn up|run|host|status|down|heal|ping|check (see --help)")
 
 
 if __name__ == "__main__":

@@ -24,6 +24,51 @@ PersistentKeepalive = 25
 """
 
 
+class Heal(unittest.TestCase):
+    def run_heal(self, handshake, now=10_000, healed_at=None, endpoint="185.107.56.22:51820"):
+        calls = []
+
+        class Result:
+            def __init__(self, out="", code=0):
+                self.stdout, self.returncode, self.stderr = out, code, ""
+
+        def fake_sh(*argv, check=True, capture=False):
+            calls.append(argv)
+            if "latest-handshakes" in argv:
+                return Result(f"{KEY}\t{handshake}\n")
+            return Result()
+
+        with tempfile.TemporaryDirectory() as state:
+            if endpoint:
+                with open(os.path.join(state, "endpoint"), "w") as handle:
+                    handle.write(endpoint + "\n")
+            if healed_at is not None:
+                marker = os.path.join(state, "healed")
+                open(marker, "w").close()
+                os.utime(marker, (healed_at, healed_at))
+            saved = vpn.sh, vpn.namespace_exists, vpn.STATE_DIR
+            vpn.sh, vpn.namespace_exists, vpn.STATE_DIR = fake_sh, lambda: True, state
+            try:
+                self.assertEqual(vpn.heal(now), 0)
+            finally:
+                vpn.sh, vpn.namespace_exists, vpn.STATE_DIR = saved
+        return [call for call in calls if "set" in call]
+
+    def test_fresh_handshake_is_left_alone(self):
+        self.assertEqual(self.run_heal(handshake=10_000 - 60), [])
+
+    def test_stale_handshake_moves_port_and_resets_endpoint(self):
+        (call,) = self.run_heal(handshake=10_000 - 600)
+        self.assertEqual(call[-7:], ("wg-serein", "listen-port", "0", "peer", KEY, "endpoint", "185.107.56.22:51820"))
+
+    def test_never_completed_handshake_heals(self):
+        self.assertEqual(len(self.run_heal(handshake=0)), 1)
+
+    def test_cooldown_prevents_port_churn(self):
+        self.assertEqual(self.run_heal(handshake=0, now=10_000, healed_at=10_000 - 30), [])
+        self.assertEqual(len(self.run_heal(handshake=0, now=10_000, healed_at=10_000 - 600)), 1)
+
+
 class Parse(unittest.TestCase):
     def test_provider_file(self):
         parsed = vpn.parse(SAMPLE)

@@ -1,0 +1,8 @@
+[Unit]
+Description=Serein VPN: restart a stalled WireGuard handshake
+# Skipped without spawning anything while the Serein tunnel is not up.
+ConditionPathExists=/run/netns/serein-vpn
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/serein-vpn heal

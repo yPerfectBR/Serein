@@ -1,0 +1,10 @@
+[Unit]
+Description=Serein VPN: check the WireGuard handshake every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=20s
+
+[Install]
+WantedBy=timers.target
