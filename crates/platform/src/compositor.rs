@@ -172,6 +172,57 @@ fn move_window(
 	Err("Hyprland rejected window move".into())
 }
 
+/// Brings this process's window back where the compositor keeps it out of sight on its own
+/// terms. Umbriel parks windows in hidden scratchpads (a window rule can send Serein there) that
+/// winit cannot map again, and a window that is never drawn never reaches its exit dialog; its
+/// CLI focuses a window by id, revealing the scratchpad. Elsewhere this does nothing.
+pub fn reveal_own_window() {
+	#[cfg(target_os = "linux")]
+	{
+		let umbriel = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktop| {
+			desktop
+				.split(':')
+				.any(|name| name.eq_ignore_ascii_case("umbriel"))
+		});
+		if !umbriel {
+			return;
+		}
+		let pid = std::process::id();
+		std::thread::spawn(move || {
+			let Ok(output) = std::process::Command::new("umbriel")
+				.args(["windows", "--json"])
+				.stdin(std::process::Stdio::null())
+				.stderr(std::process::Stdio::null())
+				.output()
+			else {
+				return;
+			};
+			let Some(id) = umbriel_window_for(&output.stdout, pid) else {
+				return;
+			};
+			let _ = std::process::Command::new("umbriel")
+				.args(["msg", "window-focus", &id])
+				.stdin(std::process::Stdio::null())
+				.stdout(std::process::Stdio::null())
+				.stderr(std::process::Stdio::null())
+				.status();
+		});
+	}
+}
+
+/// The id of `pid`'s hidden window in `umbriel windows --json` output; a visible one needs nothing.
+#[cfg(target_os = "linux")]
+fn umbriel_window_for(listing: &[u8], pid: u32) -> Option<String> {
+	let windows: Vec<serde_json::Value> = serde_json::from_slice(listing).ok()?;
+	windows
+		.iter()
+		.filter(|window| window.get("pid").and_then(|value| value.as_u64()) == Some(u64::from(pid)))
+		.find(|window| window.get("visible").and_then(|value| value.as_bool()) == Some(false))
+		.and_then(|window| window.get("id")?.as_str())
+		.filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+		.map(str::to_owned)
+}
+
 #[cfg(target_os = "linux")]
 fn request(socket: &std::path::Path, command: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 	use std::io::{Read, Write};
@@ -188,6 +239,24 @@ fn request(socket: &std::path::Path, command: &str) -> Result<Vec<u8>, Box<dyn s
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn umbriel_reveal_picks_only_this_process_hidden_window() {
+		let listing = br#"[
+			{"id":"aa11","pid":7,"visible":true},
+			{"id":"bb22","pid":9,"visible":false},
+			{"id":"cc33","pid":7,"visible":false},
+			{"id":"bad id","pid":8,"visible":false}
+		]"#;
+		assert_eq!(umbriel_window_for(listing, 7).as_deref(), Some("cc33"));
+		assert_eq!(umbriel_window_for(listing, 1), None);
+		assert_eq!(
+			umbriel_window_for(listing, 8),
+			None,
+			"ids are never passed through unchecked"
+		);
+		assert_eq!(umbriel_window_for(b"not json", 7), None);
+	}
 	use std::io::{Read, Write};
 	use std::os::unix::net::UnixListener;
 

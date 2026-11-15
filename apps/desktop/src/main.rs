@@ -1175,6 +1175,8 @@ struct Desktop {
 	/// Session generation whose account was last recorded in the switcher roster.
 	roster_generation: Option<u64>,
 	close_approved: bool,
+	/// The user chose Quit, as opposed to a restart or a window close that only hides.
+	quit_requested: bool,
 	fixture_only: bool,
 	/// Sign-in screen disclosures, folded away until the owner opens them.
 	about_open: bool,
@@ -2553,6 +2555,7 @@ impl Desktop {
 			roster_failed: false,
 			roster_generation: None,
 			close_approved: false,
+			quit_requested: false,
 			fixture_only: demo,
 			about_open: sign_in_panels,
 			token_open: sign_in_panels,
@@ -3008,7 +3011,7 @@ impl Desktop {
 					None
 				}
 				Command::Quit => {
-					self.tray_window.quit(ctx);
+					self.user_quit(ctx);
 					None
 				}
 				// Never quits, tray or not; that is Quit's job.
@@ -5618,6 +5621,50 @@ fn effects_transparent() -> bool {
 	let (enabled, transparency, _) = ui::design::window_effects();
 	enabled && transparency > 0
 }
+impl Desktop {
+	/// Work that a close would lose or interrupt, which the exit dialog asks about first.
+	fn close_needs_confirmation(&self) -> bool {
+		(self.state.demo && self.state.has_unsent())
+			|| self
+				.state
+				.pending
+				.iter()
+				.any(|p| p.delivery != Delivery::Confirmed)
+			|| self.messaging.has_edit()
+			|| self.messaging.has_server_settings_changes()
+			|| self.messaging.extensions.theme_editor_dirty()
+			|| self.state.server_settings.pending
+			|| self.state.server_admin.pending
+			|| self.uploads.has_unsent()
+			|| self.messaging.external_upload.has_unsent()
+			|| self.forgetting
+			|| self.messaging.startup_busy
+			|| self.avatar_cleanup.is_some()
+			|| self.cache_pending > 0
+			|| self.cache_clears.pending()
+			|| (!self.fixture_only && self.app_settings.state.needs_attention())
+			|| (!self.fixture_only && self.reading.needs_attention())
+			|| (!self.fixture_only && self.game_activity.needs_attention())
+			|| (!self.fixture_only && self.tray_setting.needs_attention())
+			|| self.cache_error
+	}
+	/// The user's Quit (tray menu, Ctrl+Q, app menu). With nothing to confirm or finish it exits
+	/// from this pass, even while the window sits hidden in the tray or a compositor scratchpad;
+	/// otherwise the window is shown for the exit dialog. Either way the VPN agent, if Serein
+	/// runs inside one, is ended on exit so the tunnel goes down with the app.
+	fn user_quit(&mut self, ctx: &egui::Context) {
+		self.quit_requested = true;
+		if self.close_needs_confirmation()
+			|| self.extensions.cleanup_pending()
+			|| self.downloads.is_active()
+		{
+			self.tray_window.quit(ctx);
+		} else {
+			self.tray_window.quit_now(ctx);
+		}
+	}
+}
+
 impl eframe::App for Desktop {
 	fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
 		if self.window_transparent && effects_transparent() {
@@ -5739,6 +5786,12 @@ impl eframe::App for Desktop {
 		diagnostics::flush(std::time::Duration::from_millis(500));
 		// Later launches start a new client instead of waking this one while it shuts down.
 		self.instance.release();
+		// An explicit Quit takes the tunnel down too: ending the agent makes the root helper
+		// that started it remove the namespace. Restarts (updates, route changes) never set it.
+		#[cfg(target_os = "linux")]
+		if self.quit_requested && vpn::active() {
+			vpn::stop_agent();
+		}
 		if self.updater.finish_restart().is_err() {
 			eprintln!(
 				"Could not hand off the prepared update. The installed app was not replaced."
@@ -5932,7 +5985,7 @@ impl eframe::App for Desktop {
 		for event in tray_events {
 			match event {
 				platform::tray::Event::Quit => {
-					self.tray_window.quit(ctx);
+					self.user_quit(ctx);
 				}
 				platform::tray::Event::Show => self.tray_window.show(ctx),
 				#[cfg(target_os = "linux")]
@@ -5960,7 +6013,7 @@ impl eframe::App for Desktop {
 		// Like Discord, Ctrl+Q exits even when closing the window only hides it to the tray.
 		#[cfg(not(target_os = "macos"))]
 		if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Q)) {
-			self.tray_window.quit(ctx);
+			self.user_quit(ctx);
 		}
 		let window_visible = self.window.is_visible();
 		self.tray_window.logic(
@@ -6383,29 +6436,7 @@ impl eframe::App for Desktop {
 		if close_requested
 			&& !self.close_approved
 			&& !self.tray_window.system_close()
-			&& ((self.state.demo && self.state.has_unsent())
-				|| self
-					.state
-					.pending
-					.iter()
-					.any(|p| p.delivery != Delivery::Confirmed)
-				|| self.messaging.has_edit()
-				|| self.messaging.has_server_settings_changes()
-				|| self.messaging.extensions.theme_editor_dirty()
-				|| self.state.server_settings.pending
-				|| self.state.server_admin.pending
-				|| self.uploads.has_unsent()
-				|| self.messaging.external_upload.has_unsent()
-				|| self.forgetting
-				|| self.messaging.startup_busy
-				|| self.avatar_cleanup.is_some()
-				|| self.cache_pending > 0
-				|| self.cache_clears.pending()
-				|| (!self.fixture_only && self.app_settings.state.needs_attention())
-				|| (!self.fixture_only && self.reading.needs_attention())
-				|| (!self.fixture_only && self.game_activity.needs_attention())
-				|| (!self.fixture_only && self.tray_setting.needs_attention())
-				|| self.cache_error)
+			&& self.close_needs_confirmation()
 		{
 			ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
 			self.confirming_close = true;

@@ -5,13 +5,15 @@ Used by Serein (Settings > Network > WireGuard) and usable from a terminal or sc
 
   serein-vpn up <wg.conf>                     create or refresh the namespace and tunnel
   serein-vpn run <wg.conf> [--env K=V]... -- <command...>
-                                              up, then run <command> inside it as the calling user
+                                              up, then run <command> inside it as the calling user;
+                                              the tunnel is removed once nothing runs inside it
   serein-vpn host [--env K=V]... -- <command...>
                                               run <command> outside the namespace as the calling user
   serein-vpn status                           show the tunnel and its latest handshake
   serein-vpn down                             remove the namespace and tunnel
   serein-vpn ping                             succeed once the caller is authorised (for pkexec)
-  serein-vpn heal                             restart a stalled handshake on a new UDP source port
+  serein-vpn heal                             restart a stalled handshake on a new UDP source port,
+                                              or remove a tunnel nothing runs inside any more
   serein-vpn check <wg.conf>                  validate a configuration without touching the system
 
 It needs root (use `sudo` or `pkexec`). Everything the command does, including voice and video
@@ -25,6 +27,7 @@ import os
 import pwd
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -174,6 +177,8 @@ def leave_user_namespace_state():
 
 
 def teardown():
+    # The interface first: `netns del` only unmounts, and a process still inside keeps it alive.
+    sh("ip", "-n", NS, "link", "del", "dev", IFACE, check=False)
     sh("ip", "netns", "del", NS, check=False)
     sh("ip", "link", "del", "dev", IFACE, check=False)
     shutil.rmtree(NETNS_ETC, ignore_errors=True)
@@ -295,6 +300,75 @@ def handshake_age(now):
     return fields[0], (now - stamp if stamp else None)
 
 
+def namespace_inode():
+    try:
+        return os.stat(f"/run/netns/{NS}").st_ino
+    except OSError:
+        return None
+
+
+def namespace_in_use(proc="/proc"):
+    """Whether any process still lives in the namespace (Serein, its agent, a `run` command)."""
+    try:
+        inode = os.stat(f"/run/netns/{NS}").st_ino
+    except OSError:
+        return False
+    target = f"net:[{inode}]"
+    for pid in os.listdir(proc):
+        if not pid.isdigit():
+            continue
+        try:
+            if os.readlink(f"{proc}/{pid}/ns/net") == target:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def release_when_empty(inode, wait=30):
+    """After `run`'s command ends, remove the tunnel once the namespace empties (Serein exits a
+    moment after its agent). Something still inside after `wait` seconds keeps it, and so does a
+    namespace that was replaced meanwhile (a route change brought up a new tunnel)."""
+    deadline = time.monotonic() + wait
+    while inode is not None and namespace_inode() == inode:
+        if not namespace_in_use():
+            teardown()
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.5)
+
+
+def run_and_release(entry, environment, command, extra):
+    """Runs the command as the user inside the namespace and stays behind as root to take the
+    tunnel down when it is done, so quitting Serein (which ends its agent) also ends the VPN."""
+    inode = namespace_inode()
+    child = os.fork()
+    if child == 0:
+        try:
+            exec_as_user(entry, ["ip", "netns", "exec", NS], environment, command, extra)
+        finally:
+            os._exit(127)
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, lambda *_: None)
+    while True:
+        try:
+            _, status = os.waitpid(child, 0)
+            break
+        except InterruptedError:
+            continue
+    release_when_empty(inode)
+    return os.waitstatus_to_exitcode(status) if status else 0
+
+
+def recently_created(grace=120):
+    """A tunnel `up` or `run` just made has no process inside for a moment; leave it alone."""
+    try:
+        return time.time() - os.path.getmtime(os.path.join(STATE_DIR, "fingerprint")) < grace
+    except OSError:
+        return False
+
+
 def heal(now=None):
     """Moves a stalled tunnel to a new UDP source port.
 
@@ -304,6 +378,11 @@ def heal(now=None):
     re-resolves a hostname endpoint. Runs from serein-vpn-watchdog.timer; a no-op while healthy.
     """
     if not namespace_exists():
+        return 0
+    if not namespace_in_use() and not recently_created():
+        # Left behind (a crash, or a tunnel started with `up`): nothing uses it.
+        teardown()
+        print("serein-vpn: nothing runs inside the tunnel any more; removed it")
         return 0
     now = time.time() if now is None else now
     peer, age = handshake_age(now)
@@ -363,8 +442,8 @@ def main(argv):
     if command == "run" and len(argv) >= 2:
         parsed = up(argv[1], entry)
         environment, run = split_command(argv[2:])
-        exec_as_user(entry, ["ip", "netns", "exec", NS], environment, run,
-                     {"SEREIN_VPN_ACTIVE": "1", "SEREIN_VPN_ENDPOINT": parsed["peer"]["endpoint"]})
+        return run_and_release(entry, environment, run,
+                               {"SEREIN_VPN_ACTIVE": "1", "SEREIN_VPN_ENDPOINT": parsed["peer"]["endpoint"]})
     if command == "host":
         environment, run = split_command(argv[1:])
         exec_as_user(entry, [], environment, run, {})

@@ -25,7 +25,7 @@ PersistentKeepalive = 25
 
 
 class Heal(unittest.TestCase):
-    def run_heal(self, handshake, now=10_000, healed_at=None, endpoint="185.107.56.22:51820"):
+    def run_heal(self, handshake, now=10_000, healed_at=None, endpoint="185.107.56.22:51820", in_use=True):
         calls = []
 
         class Result:
@@ -46,13 +46,23 @@ class Heal(unittest.TestCase):
                 marker = os.path.join(state, "healed")
                 open(marker, "w").close()
                 os.utime(marker, (healed_at, healed_at))
-            saved = vpn.sh, vpn.namespace_exists, vpn.STATE_DIR
+            saved = vpn.sh, vpn.namespace_exists, vpn.STATE_DIR, vpn.namespace_in_use
             vpn.sh, vpn.namespace_exists, vpn.STATE_DIR = fake_sh, lambda: True, state
+            vpn.namespace_in_use = lambda: in_use
             try:
                 self.assertEqual(vpn.heal(now), 0)
             finally:
-                vpn.sh, vpn.namespace_exists, vpn.STATE_DIR = saved
+                vpn.sh, vpn.namespace_exists, vpn.STATE_DIR, vpn.namespace_in_use = saved
+        self.calls = calls
         return [call for call in calls if "set" in call]
+
+    def test_an_unused_tunnel_is_removed(self):
+        self.assertEqual(self.run_heal(handshake=10_000 - 60, in_use=False), [])
+        self.assertTrue(any("del" in call for call in self.calls), self.calls)
+
+    def test_a_tunnel_in_use_is_never_removed(self):
+        self.run_heal(handshake=0)
+        self.assertFalse(any("del" in call for call in self.calls), self.calls)
 
     def test_fresh_handshake_is_left_alone(self):
         self.assertEqual(self.run_heal(handshake=10_000 - 60), [])

@@ -11,6 +11,9 @@ pub struct State {
 	close_after_show: bool,
 	/// The close came from the system (a session logout), so it must not stop at exit checks.
 	system_close: bool,
+	/// A quit with nothing to confirm: closes from the logic pass without showing the window,
+	/// which a hidden window (a compositor scratchpad, the tray) never draws.
+	quit_now: bool,
 	/// A winit hide was issued to park the window in the tray and has not been
 	/// confirmed yet. Compositor IPC hides are trusted; winit visibility and
 	/// minimize commands are ignored by some compositors (Hyprland), so their
@@ -51,6 +54,7 @@ impl Default for State {
 			exiting: false,
 			close_after_show: false,
 			system_close: false,
+			quit_now: false,
 			hide_pending: false,
 			hide_wait: 0,
 			compositor: platform::compositor::Hider::detect(),
@@ -77,6 +81,9 @@ impl State {
 			compositor.show();
 		}
 		ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+		if self.compositor.is_none() {
+			platform::compositor::reveal_own_window();
+		}
 		ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
 		ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
 		ctx.request_repaint();
@@ -110,13 +117,22 @@ impl State {
 		self.close_after_show = true;
 		self.show(ctx);
 	}
+	/// Quit when the desktop found nothing that needs confirming: exits without a ui pass.
+	pub fn quit_now(&mut self, ctx: &egui::Context) {
+		self.exiting = true;
+		self.quit_now = true;
+		ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+		ctx.request_repaint();
+	}
 	pub fn cancel_quit(&mut self) {
 		self.exiting = false;
 		self.close_after_show = false;
 		self.system_close = false;
+		self.quit_now = false;
 	}
+	/// True when the close must not stop at exit checks (a session logout or an unconfirmed quit).
 	pub fn system_close(&self) -> bool {
-		self.system_close
+		self.system_close || self.quit_now
 	}
 	/// `native_visible` is winit's `Window::is_visible()`: `None` where the backend
 	/// cannot report it (Wayland), which is the same platforms `can_hide` is false on.
@@ -195,7 +211,7 @@ impl State {
 			self.exiting = true;
 			// A hidden window runs only logic passes, and KWin does not show it again while the
 			// session ends, so let this close through instead of waiting for a ui pass.
-			if system_close {
+			if system_close || self.quit_now {
 				return;
 			}
 			if unseen || self.close_after_show {
