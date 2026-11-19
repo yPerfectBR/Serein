@@ -18,14 +18,6 @@ use zeroize::Zeroizing;
 
 /// Rapid mute/deafen toggles inside this window collapse into one voice state update.
 const STATE_COALESCE: Duration = Duration::from_millis(120);
-/// Privacy-safe diagnostics (event names only) when SEREIN_VOICE_DIAGNOSTICS=1.
-fn diag(event: &str) {
-	if std::env::var_os("SEREIN_VOICE_DIAGNOSTICS").is_some_and(|value| value == "1") {
-		eprintln!("[Serein voice Gateway] {event}");
-	}
-}
-/// Largest voice update kept for a move replay.
-const MAX_RAW_UPDATE: usize = 8 * 1024;
 
 struct StreamAttempt {
 	channel: Id,
@@ -64,14 +56,6 @@ pub(super) struct Calls {
 	sent_state: Option<((bool, bool, bool), Instant)>,
 	/// A coalesced mute/deafen change is sent when this passes; only the newest state goes out.
 	pub(super) state_deadline: Option<Instant>,
-	/// The latest raw voice-state update (bounded), kept so a server move can be replayed.
-	last_state_raw: Option<Vec<u8>>,
-	/// The channel the server just moved this account to, when, and the update that moved it.
-	moved_to: Option<(Id, Instant, Vec<u8>)>,
-	/// The voice-server update that followed the move, received while no call was active.
-	server_after_move: Option<Vec<u8>>,
-	/// Updates to replay once the follow-up join has been registered (state, then server).
-	replay_pending: Option<(Vec<u8>, Option<Vec<u8>>)>,
 	departing: Option<(Id, u64)>,
 	departing_guild: Option<Id>,
 	departing_session: Option<Secret>,
@@ -352,13 +336,6 @@ impl Calls {
 				self.muted = mute || deaf;
 				self.deafened = deaf;
 				self.camera = false;
-				// Following a server move: Discord already has this account in the channel and sends
-				// no new credentials, so the update that moved it (and its voice server) are replayed.
-				if let Some((_, _, state_raw)) = self.moved_to.take().filter(|(to, at, raw)| {
-					*to == channel && at.elapsed() < Duration::from_secs(30) && !raw.is_empty()
-				}) {
-					self.replay_pending = Some((state_raw, self.server_after_move.take()));
-				}
 				(Some(channel), guild)
 			}
 			Command::AbandonSession { channel, request } => {
@@ -453,26 +430,6 @@ impl Calls {
 			| Command::RingRecipient { .. } => return Ok(None),
 		};
 		Ok(Some(self.state_frame(channel, guild)))
-	}
-	/// Replays the updates saved at a server move, once the follow-up join is registered, so the
-	/// call connects with the credentials Discord already issued.
-	pub(super) fn replay_move(
-		&mut self,
-		owner: Option<Id>,
-		emit: &impl Fn(Event) -> Result<(), Failure>,
-	) -> Result<(), Failure> {
-		if let Some((state_raw, server_raw)) = self.replay_pending.take() {
-			diag(if server_raw.is_some() {
-				"move_replay_state_and_server"
-			} else {
-				"move_replay_state_only"
-			});
-			self.dispatch("VOICE_STATE_UPDATE", &state_raw, owner, emit)?;
-			if let Some(server_raw) = server_raw {
-				self.dispatch("VOICE_SERVER_UPDATE", &server_raw, owner, emit)?;
-			}
-		}
-		Ok(())
 	}
 	fn state_frame(&mut self, channel: Option<Id>, guild: Option<Id>) -> Frame {
 		self.sent_state = Some(((self.muted, self.deafened, self.camera), Instant::now()));
@@ -957,21 +914,38 @@ impl Calls {
 		if !allowed && !own {
 			return Ok(());
 		}
-		// A move keeps this device's voice session. An update for another channel that carries the
-		// session already seen for the active call is therefore the server moving us (for example a
-		// bot taking us out of a "create a channel" room right after the join), not a stale frame
-		// from a previous channel.
-		let same_session = own
-			&& session.as_ref().is_some_and(|session| {
-				self.active_session
-					.as_ref()
-					.is_some_and(|previous| previous.expose() == session.as_str())
-			});
-		let matches_active = allowed
+		let mut matches_active = allowed
 			&& self
 				.active
 				.is_some_and(|(channel, _)| state.channel_id == Some(channel))
 			&& self.active_guild == state.guild_id;
+		// Someone moved this device's own confirmed session to another voice channel of the
+		// server (unverified: the moved voice state keeps its session ID). The call follows it;
+		// a different session there is still another client taking the call over.
+		if own
+			&& allowed
+			&& !matches_active
+			&& self.session_confirmed
+			&& self.active_guild.is_some()
+			&& self.active_guild == state.guild_id
+			&& let Some(channel) = state.channel_id
+			&& let Some((from, request)) = self.active
+			&& session.as_ref().is_some_and(|session| {
+				self.active_session
+					.as_ref()
+					.is_some_and(|active| active.expose() == session.as_str())
+			}) {
+			self.active = Some((channel, request));
+			self.stream = None;
+			self.watch = None;
+			self.camera = false;
+			matches_active = true;
+			emit(Event::Voice(voice::Event::Moved {
+				from,
+				channel,
+				request,
+			}))?;
+		}
 		if own && matches_active {
 			// Discord has applied the join, so any earlier hangup was processed before it.
 			self.superseded = None;
@@ -982,7 +956,6 @@ impl Calls {
 			&& self.active.is_some()
 			&& !matches_active
 			&& !self.session_confirmed
-			&& !same_session
 		{
 			// A previous-channel update cannot invalidate a newly submitted, unconfirmed Join.
 			return Ok(());
@@ -992,9 +965,7 @@ impl Calls {
 		} else {
 			None
 		};
-		let moved = (self.session_confirmed || same_session)
-			&& state.channel_id.is_some()
-			&& !matches_active;
+		let moved = self.session_confirmed && state.channel_id.is_some() && !matches_active;
 		let changed_session = self.session_confirmed
 			&& matches_active
 			&& secret.as_ref().is_some_and(|session| {
@@ -1013,19 +984,6 @@ impl Calls {
 			self.watch = None;
 			self.camera = false;
 			emit(Event::Voice(voice::Event::TakenOver { channel, request }))?;
-			// A move (not another device replacing this session) to a channel we know: follow it.
-			if moved
-				&& allowed && let Some(target) = state.channel_id
-			{
-				self.moved_to = Some((
-					target,
-					Instant::now(),
-					self.last_state_raw.clone().unwrap_or_default(),
-				));
-				self.server_after_move = None;
-				diag("moved_by_server");
-				emit(Event::Voice(voice::Event::Moved { channel: target }))?;
-			}
 		} else if let Some(session) = &secret
 			&& self
 				.active_session
@@ -1142,17 +1100,12 @@ impl Calls {
 					}))?;
 				}
 			}
-			"VOICE_STATE_UPDATE" => {
-				if data.len() <= MAX_RAW_UPDATE {
-					self.last_state_raw = Some(data.to_vec());
-				}
-				self.state(
-					decode(data).map_err(|_| Failure::Protocol)?,
-					None,
-					owner,
-					emit,
-				)?
-			}
+			"VOICE_STATE_UPDATE" => self.state(
+				decode(data).map_err(|_| Failure::Protocol)?,
+				None,
+				owner,
+				emit,
+			)?,
 			"CHANNEL_INFO" => {
 				let info: ChannelInfoDto = decode(data).map_err(|_| Failure::Protocol)?;
 				if info.channels.len() > client_core::MAX_NAV {
@@ -1173,10 +1126,6 @@ impl Calls {
 				self.channel_started(update.guild_id, update.id, update.voice_start_time, emit)?;
 			}
 			"VOICE_SERVER_UPDATE" => {
-				if self.active.is_none() && self.moved_to.is_some() && data.len() <= MAX_RAW_UPDATE
-				{
-					self.server_after_move = Some(data.to_vec());
-				}
 				let mut server: VoiceServerDto = decode(data).map_err(|_| Failure::Protocol)?;
 				let token = Zeroizing::new(std::mem::take(&mut server.token));
 				let Some((channel, request)) = self.active else {
@@ -2243,10 +2192,6 @@ mod tests {
 			));
 			assert!(matches!(
 				events.lock().unwrap()[1],
-				Event::Voice(voice::Event::Moved { channel: Id(21) })
-			));
-			assert!(matches!(
-				events.lock().unwrap()[2],
 				Event::Voice(voice::Event::State {
 					channel: Some(Id(21)),
 					request: None,
@@ -2305,130 +2250,6 @@ mod tests {
 			);
 			assert_eq!(calls.active, Some((Id(21), 6)));
 		}
-	}
-
-	#[test]
-	fn a_server_move_right_after_the_join_is_not_mistaken_for_a_stale_frame() {
-		// A "create a channel" room moves the member before the join is confirmed.
-		let mut calls = Calls::default();
-		calls.allowed.insert(Id(20), Some(Id(10)));
-		calls.allowed.insert(Id(21), Some(Id(10)));
-		let events = Mutex::new(Vec::new());
-		let emit = |event| {
-			events.lock().unwrap().push(event);
-			Ok(())
-		};
-		let update = |channel, session| {
-			serde_json::to_vec(
-				&json!({"guild_id":Id(10),"channel_id":channel,"user_id":Id(1),"session_id":session}),
-			)
-			.unwrap()
-		};
-		calls
-			.packet(Command::Join {
-				channel: Id(20),
-				request: 5,
-				ring: false,
-				mute: false,
-				deaf: false,
-			})
-			.unwrap();
-		calls
-			.dispatch(
-				"VOICE_STATE_UPDATE",
-				&update(Id(20), "ours"),
-				Some(Id(1)),
-				&emit,
-			)
-			.unwrap();
-		assert!(!calls.session_confirmed);
-		// A frame for another channel with a different session is still a stale one: ignored.
-		events.lock().unwrap().clear();
-		calls
-			.dispatch(
-				"VOICE_STATE_UPDATE",
-				&update(Id(21), "previous"),
-				Some(Id(1)),
-				&emit,
-			)
-			.unwrap();
-		assert_eq!(calls.active, Some((Id(20), 5)));
-		assert!(events.lock().unwrap().is_empty());
-		// The same session now in another channel is the server moving us.
-		calls
-			.dispatch(
-				"VOICE_STATE_UPDATE",
-				&update(Id(21), "ours"),
-				Some(Id(1)),
-				&emit,
-			)
-			.unwrap();
-		assert!(!calls.has_call());
-		assert!(matches!(
-			events.lock().unwrap()[0],
-			Event::Voice(voice::Event::TakenOver {
-				channel: Id(20),
-				request: 5
-			})
-		));
-		assert!(matches!(
-			events.lock().unwrap()[1],
-			Event::Voice(voice::Event::Moved { channel: Id(21) })
-		));
-		// The move's voice server arrives while no call is active; it is kept for the follow-up join.
-		let server = serde_json::to_vec(&json!({
-			"guild_id":Id(10),"token":"synthetic-token","endpoint":"synthetic.discord.media"
-		}))
-		.unwrap();
-		calls
-			.dispatch("VOICE_SERVER_UPDATE", &server, Some(Id(1)), &emit)
-			.unwrap();
-		events.lock().unwrap().clear();
-		// Following the move joins the new channel and replays the saved credentials, because
-		// Discord already has the account there and sends nothing new.
-		let Some(Frame::Text(join)) = calls
-			.packet(Command::Join {
-				channel: Id(21),
-				request: 6,
-				ring: false,
-				mute: false,
-				deaf: false,
-			})
-			.unwrap()
-		else {
-			panic!("the follow must send a join")
-		};
-		let join: serde_json::Value = serde_json::from_str(&join).unwrap();
-		assert_eq!(join["d"]["channel_id"], json!(Id(21)));
-		assert_eq!(calls.active, Some((Id(21), 6)));
-		calls.replay_move(Some(Id(1)), &emit).unwrap();
-		let events = events.lock().unwrap();
-		assert!(
-			events.iter().any(|event| matches!(
-				event,
-				Event::Voice(voice::Event::State {
-					request: Some(6),
-					channel: Some(Id(21)),
-					session: Some(_),
-					..
-				})
-			)),
-			"the replayed move update registers the session for the new request"
-		);
-		assert!(
-			events.iter().any(|event| matches!(
-				event,
-				Event::Voice(voice::Event::Server {
-					request: 6,
-					channel: Id(21),
-					..
-				})
-			)),
-			"the saved voice server is delivered to the new call"
-		);
-		drop(events);
-		// Nothing is replayed twice, nor for a join that is not a follow.
-		calls.replay_move(Some(Id(1)), &emit).unwrap();
 	}
 
 	#[test]

@@ -18,14 +18,22 @@ impl Dialog {
 	}
 }
 
+/// The state a cached invite channel was found for, and that channel.
+type InviteTarget = ((Id, Option<Id>, u64), Option<Id>);
+
 #[derive(Default)]
 pub(super) struct ServerMenu {
 	pub settings_requested: Option<Id>,
 	pub mark_read_requested: Option<Id>,
 	pub mark_all_read_requested: bool,
 	pub mark_read_folder_requested: Option<Vec<Id>>,
+	/// Browse Channels was chosen for this server.
+	pub browse_requested: Option<Id>,
+	pub channel_list_requested: Option<(Id, client_core::channel_list::Change)>,
 	dialog: Option<Dialog>,
 	generation: u64,
+	/// Where the header's invite shortcut creates its invite, found once per state revision.
+	invite_target: Option<InviteTarget>,
 	invite: InviteDialog,
 	notifications: crate::server_notifications::Editor,
 }
@@ -51,6 +59,67 @@ impl ServerMenu {
 			return true;
 		}
 		false
+	}
+	/// "Show All Channels" and "Browse Channels", once the opt-in settings are known.
+	pub fn channel_list_items(&mut self, ui: &mut egui::Ui, state: &State, guild: Id) {
+		let Some(opt_in) = state.channel_list_opt_in(guild) else {
+			return;
+		};
+		let colors = design::palette(ui);
+		let show_all = !opt_in;
+		let response = ui
+			.add_enabled_ui(state.can_change_channel_list(guild), |ui| {
+				menu_row(
+					ui,
+					icons::Icon::Hash,
+					"channel-browser-show-all-channels",
+					colors.text,
+				)
+			})
+			.inner;
+		response.widget_info(|| {
+			egui::WidgetInfo::selected(
+				egui::Role::CheckBox,
+				state.can_change_channel_list(guild),
+				show_all,
+				crate::i18n::translate("channel-browser-show-all-channels"),
+			)
+		});
+		let mark = egui::Rect::from_center_size(
+			egui::pos2(response.rect.right() - 16.0, response.rect.center().y),
+			egui::Vec2::splat(20.0),
+		);
+		ui.painter().rect(
+			mark,
+			4,
+			if show_all { colors.accent } else { colors.base },
+			egui::Stroke::new(1.0, colors.border),
+			egui::StrokeKind::Inside,
+		);
+		if show_all {
+			icons::paint(
+				ui.painter(),
+				icons::Icon::Check,
+				mark.shrink(4.0),
+				colors.text_strong,
+			);
+		}
+		if response.clicked() {
+			self.channel_list_requested =
+				Some((guild, client_core::channel_list::Change::ShowAll(!show_all)));
+			ui.close();
+		}
+		if menu_row(
+			ui,
+			icons::Icon::Search,
+			"channel-browser-title",
+			colors.text,
+		)
+		.clicked()
+		{
+			self.browse_requested = Some(guild);
+			ui.close();
+		}
 	}
 	pub fn read_item(&mut self, ui: &mut egui::Ui, state: &State, guild: Id) -> bool {
 		if ui
@@ -193,35 +262,59 @@ impl ServerMenu {
 		self.generation = state.generation;
 		self.invite.open();
 	}
-	/// Draws the server name header and its dropdown menu, including plugin server actions.
+	fn invite_target(&mut self, state: &State, guild: Id) -> Option<Id> {
+		let key = (guild, state.selected, state.revision);
+		match self.invite_target {
+			Some((cached, channel)) if cached == key => channel,
+			_ => {
+				let channel = state.invite_channel(guild);
+				self.invite_target = Some((key, channel));
+				channel
+			}
+		}
+	}
+	/// Draws the server name header, its invite shortcut and its dropdown menu, including plugin
+	/// server actions. `on_banner` lights them for the banner painted behind the header.
 	pub fn header(
 		&mut self,
 		ui: &mut egui::Ui,
 		state: &mut State,
 		guild: Id,
 		title: &str,
+		on_banner: bool,
 	) -> egui::Response {
 		ui.push_id(("server-menu", guild), |ui| {
 			let colors = design::palette(ui);
+			let (strong, muted, hover) = if on_banner {
+				(
+					egui::Color32::WHITE,
+					egui::Color32::WHITE,
+					egui::Color32::from_black_alpha(96),
+				)
+			} else {
+				(colors.text_strong, colors.muted, colors.hover)
+			};
+			const INVITE: f32 = 28.0;
+			let invite = self.invite_target(state, guild);
+			let reserved = if invite.is_some() {
+				INVITE + ui.spacing().item_spacing.x
+			} else {
+				0.0
+			};
 			let button = ui.add_sized(
-				[ui.available_width(), 40.0],
+				[(ui.available_width() - reserved).max(0.0), 40.0],
 				egui::Button::new(()).frame(false),
 			);
 			egui::ContainerAtom::new((
 				design::semibold(ui, title, 15.0),
 				egui::Atom::paint(egui::Vec2::splat(14.0), |ui, args| {
-					icons::paint(
-						ui.painter(),
-						icons::Icon::ChevronDown,
-						args.rect,
-						colors.muted,
-					);
+					icons::paint(ui.painter(), icons::Icon::ChevronDown, args.rect, muted);
 				}),
 			))
 			.gap(5.0)
 			.align2(egui::Align2::LEFT_CENTER)
 			.wrap_mode(egui::TextWrapMode::Truncate)
-			.fallback_text_color(colors.text_strong)
+			.fallback_text_color(strong)
 			.measure(ui, button.rect.size())
 			.paint_at(ui, button.rect);
 			button.widget_info(|| {
@@ -256,6 +349,7 @@ impl ServerMenu {
 					ui.separator();
 					self.settings_item(ui, state, guild);
 					self.notifications_item(ui, state, guild);
+					self.channel_list_items(ui, state, guild);
 					if ui
 						.add_enabled_ui(available, |ui| {
 							menu_row(
@@ -289,6 +383,36 @@ impl ServerMenu {
 						));
 					}
 				});
+			if let Some(channel) = invite {
+				let label = crate::i18n::translate("server-menu-header-create-invite");
+				let available = !state.server_action_pending()
+					&& !state.server_invite_pending()
+					&& (state.demo || state.gateway_connected);
+				let (rect, response) =
+					ui.allocate_exact_size(egui::Vec2::splat(INVITE), egui::Sense::click());
+				let hot = response.hovered() || response.has_focus();
+				if hot {
+					ui.painter().rect_filled(rect, 6, hover);
+				}
+				icons::paint(
+					ui.painter(),
+					icons::Icon::AddPeople,
+					egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(18.0)),
+					if !available {
+						muted.gamma_multiply(0.5)
+					} else if hot {
+						strong
+					} else {
+						muted
+					},
+				);
+				response.widget_info(|| {
+					egui::WidgetInfo::labeled(egui::Role::Button, available, &label)
+				});
+				if icons::immediate_tooltip(response, &label).clicked() && available {
+					self.open_invite(state, guild, channel);
+				}
+			}
 			button
 		})
 		.inner
@@ -498,6 +622,7 @@ mod tests {
 					state,
 					Id(10),
 					"A long synthetic server name for the narrow sidebar",
+					false,
 				));
 				menu.show(
 					ui.ctx(),

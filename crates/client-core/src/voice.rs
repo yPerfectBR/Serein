@@ -177,8 +177,6 @@ pub struct State {
 	pub ring_error: Option<(Id, u64, &'static str)>,
 	pub roster: Vec<RosterEntry>,
 	pub preview: Option<StreamPreview>,
-	/// The channel the server moved this account to; the interface joins it (once) to follow.
-	pub follow: Option<Id>,
 	sequence: u64,
 }
 impl State {
@@ -305,11 +303,14 @@ pub enum Event {
 		channel: Id,
 		request: u64,
 	},
-	/// The server moved this account to another voice channel it may join (after a `TakenOver`).
-	Moved {
-		channel: Id,
-	},
 	Departed {
+		channel: Id,
+		request: u64,
+	},
+	/// Discord moved this device's own session to another voice channel of the same server.
+	/// The call follows it; no join is sent.
+	Moved {
+		from: Id,
 		channel: Id,
 		request: u64,
 	},
@@ -855,9 +856,31 @@ impl ClientState {
 			Event::Departed { channel, request } => {
 				self.voice.departed = Some((channel, request));
 			}
-			Event::Moved { channel } => {
-				if self.can_call(channel) {
-					self.voice.follow = Some(channel);
+			Event::Moved {
+				from,
+				channel,
+				request,
+			} => {
+				let participants = self
+					.voice
+					.roster
+					.iter()
+					.filter(|entry| entry.channel == channel)
+					.map(|entry| entry.participant)
+					.take(MAX_PARTICIPANTS)
+					.collect();
+				if let Some(call) = &mut self.voice.active
+					&& call.channel == from
+					&& call.request == request
+					&& call.guild.is_some()
+					&& call.phase != Phase::Failed
+				{
+					call.channel = channel;
+					call.channel_started_at = None;
+					// Video belongs to the channel left behind; the microphone choice stays.
+					call.camera = false;
+					call.watching = None;
+					call.participants = participants;
 				}
 			}
 			Event::Snapshot {
@@ -1410,6 +1433,7 @@ mod tests {
 				cosmetics: None,
 			}),
 			guilds: vec![model::Guild {
+				banner: None,
 				default_message_notifications: None,
 				id: Id(10),
 				name: "Synthetic".into(),
@@ -1419,6 +1443,7 @@ mod tests {
 			}],
 			channels: vec![Channel {
 				user_limit: None,
+				slowmode: 0,
 				id: Id(20),
 				guild: Some(Id(10)),
 				kind: 2,
@@ -1541,17 +1566,6 @@ mod tests {
 		assert_eq!(state.voice.active.as_ref().unwrap().request, next);
 	}
 	#[test]
-	fn a_server_move_asks_to_follow_only_into_a_channel_that_can_be_joined() {
-		let mut state = stream_preview_state();
-		state.apply_voice(Event::Moved { channel: Id(99) });
-		assert_eq!(
-			state.voice.follow, None,
-			"unknown or forbidden channels are not followed"
-		);
-		state.apply_voice(Event::Moved { channel: Id(20) });
-		assert_eq!(state.voice.follow, Some(Id(20)));
-	}
-	#[test]
 	fn stream_preview_is_scoped_to_the_current_streamer_request() {
 		{
 			let mut state = stream_preview_state();
@@ -1657,6 +1671,7 @@ mod tests {
 					discriminator: 0,
 				}),
 				guilds: vec![model::Guild {
+					banner: None,
 					default_message_notifications: None,
 					stickers: None,
 					id: Id(10),
@@ -1668,6 +1683,7 @@ mod tests {
 					.into_iter()
 					.map(|id| Channel {
 						user_limit: None,
+						slowmode: 0,
 						id: Id(id),
 						guild: Some(Id(10)),
 						kind: 2,
@@ -1937,6 +1953,7 @@ mod tests {
 					discriminator: 0,
 				}),
 				guilds: vec![model::Guild {
+					banner: None,
 					default_message_notifications: None,
 					stickers: None,
 					id: Id(10),
@@ -1948,6 +1965,7 @@ mod tests {
 					.into_iter()
 					.map(|id| Channel {
 						user_limit: None,
+						slowmode: 0,
 						id: Id(id),
 						guild: Some(Id(10)),
 						kind: 2,
@@ -2084,6 +2102,7 @@ mod tests {
 			}),
 			channels: vec![Channel {
 				user_limit: None,
+				slowmode: 0,
 				last_message: None,
 				id: Id(2),
 				name: "DM".into(),
@@ -2376,6 +2395,7 @@ mod tests {
 				}),
 				channels: vec![Channel {
 					user_limit: None,
+					slowmode: 0,
 					last_message: None,
 					id: Id(2),
 					name: "DM".into(),

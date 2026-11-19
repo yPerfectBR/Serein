@@ -331,20 +331,43 @@ pub fn quick_button(ui: &mut egui::Ui, emoji: &str, reacted: bool) -> egui::Resp
 	crate::icons::immediate_tooltip(response, &label)
 }
 
+/// Vertical space the who-reacted dialog keeps for its title, emoji tabs and footer.
+const LIST_RESERVED: f32 = 190.0;
+
+/// A who-reacted row: [`Avatars::show_plain`] at 36px and the name beside it.
+///
+/// [`Avatars::show_plain`]: crate::avatars::Avatars::show_plain
+const REACTOR: crate::skeleton::Row = crate::skeleton::Row {
+	height: 36.0,
+	avatar: 36.0,
+	square: false,
+	lines: 1,
+	inset: 0.0,
+};
+
+/// `count` reactor rows, spaced like the list.
+fn pending_reactors(ui: &mut egui::Ui, count: usize) {
+	let gap = ui.spacing().item_spacing.y;
+	crate::skeleton::rows_spaced(
+		ui,
+		&crate::i18n::translate("reactions-show-users-loading-reactions"),
+		REACTOR,
+		count,
+		gap,
+	);
+}
+
 pub fn show_users(
 	ctx: &egui::Context,
 	state: &mut client_core::State,
 	avatars: &mut crate::avatars::Avatars,
 	commands: &mut Vec<client_core::Command>,
-) {
-	let Some(details) = state
+) -> Option<model::User> {
+	let details = state
 		.reactions
 		.users
 		.as_ref()
-		.filter(|details| details.open)
-	else {
-		return;
-	};
+		.filter(|details| details.open)?;
 	let reactions = state
 		.timeline
 		.get(details.message)
@@ -353,6 +376,7 @@ pub fn show_users(
 	let mut select = None;
 	let mut more = false;
 	let mut close = false;
+	let mut profile = None;
 	let response = crate::dialog::Dialog::new(
 		"reaction-users",
 		crate::i18n::translate("reactions-show-users-reactions"),
@@ -381,14 +405,18 @@ pub fn show_users(
 				}
 			});
 		});
-		dialog.scroll(190.0, |ui| {
+		// As many reactor rows as the reaction counts, up to what the list shows unscrolled.
+		// Dialog content spaces its rows 8px apart.
+		let pitch = REACTOR.height + 8.0;
+		let fits = ((dialog.scroll_height(LIST_RESERVED) + 8.0) / pitch).floor();
+		let first_page = reactions
+			.iter()
+			.find(|reaction| details.emoji.same(&reaction.emoji))
+			.map_or(3, |reaction| reaction.count as usize)
+			.clamp(1, fits.max(1.0) as usize);
+		dialog.scroll(LIST_RESERVED, |ui| {
 			if details.users.is_empty() && details.loading {
-				ui.horizontal(|ui| {
-					ui.spinner();
-					ui.label(crate::i18n::translate(
-						"reactions-show-users-loading-reactions",
-					));
-				});
+				pending_reactors(ui, first_page);
 			} else if details.users.is_empty() {
 				crate::dialog::hint(
 					ui,
@@ -398,10 +426,26 @@ pub fn show_users(
 				);
 			}
 			for user in &details.users {
-				ui.horizontal(|ui| {
-					avatars.show_plain(ui, user, 36.0, state.demo);
-					ui.label(crate::design::medium(ui, &user.name, 15.0));
+				let row = ui
+					.horizontal(|ui| {
+						avatars.show_plain(ui, user, REACTOR.avatar, state.demo);
+						ui.label(crate::design::medium(ui, &user.name, 15.0));
+					})
+					.response;
+				// The avatar and name open the full profile, which takes this dialog's place.
+				let person = ui
+					.interact(
+						row.rect,
+						ui.make_persistent_id(("reactor", user.id)),
+						egui::Sense::click(),
+					)
+					.on_hover_cursor(egui::CursorIcon::PointingHand);
+				person.widget_info(|| {
+					egui::WidgetInfo::labeled(egui::Role::Button, true, &user.name)
 				});
+				if person.clicked() && !user.webhook {
+					profile = Some(user.clone());
+				}
 			}
 			if details.users.len() >= client_core::reactions::MAX_REACTION_USERS {
 				crate::dialog::hint(ui, "reactions-show-users-showing-the-first-1-000-reactions");
@@ -418,7 +462,10 @@ pub fn show_users(
 				}
 			} else if !details.exhausted {
 				if details.loading {
-					ui.spinner();
+					// A first page shows its placeholder rows above instead.
+					if !details.users.is_empty() {
+						pending_reactors(ui, 2);
+					}
 				} else if crate::dialog::action(
 					ui,
 					"reactions-show-users-load-more",
@@ -439,7 +486,7 @@ pub fn show_users(
 			.clicked();
 		});
 	});
-	close |= response.close;
+	close |= response.close || profile.is_some();
 	if close {
 		state.close_reaction_users();
 	} else if let Some(emoji) = select {
@@ -449,6 +496,7 @@ pub fn show_users(
 	} else if more && let Some(command) = state.next_reaction_users_page() {
 		commands.push(command);
 	}
+	profile
 }
 
 #[cfg(test)]

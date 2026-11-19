@@ -1139,6 +1139,12 @@ struct Desktop {
 	/// `--demo-reply`: keeps two synthetic typists active on the selected fixture channel.
 	#[cfg(feature = "demo")]
 	demo_typing: bool,
+	/// `--demo-loading`: fetches stay unanswered; see `demo_fetch` and `hold_demo_loading`.
+	#[cfg(feature = "demo")]
+	demo_loading: bool,
+	/// `--demo-loading=partial`: loaded content, profiles and artwork are kept.
+	#[cfg(feature = "demo")]
+	demo_loading_partial: bool,
 	variant_changed: bool,
 	pending_save: Option<Arc<SessionSecret>>,
 	/// Written under the account's own entry on every READY, including a launch restore, so
@@ -1160,6 +1166,8 @@ struct Desktop {
 	/// Saved account awaiting the owner's confirmation before it is forgotten.
 	confirming_forget: Option<model::Id>,
 	credential_status: &'static str,
+	/// Why the last connection ended, kept for the diagnostics report after it is dropped.
+	last_stop: Option<SessionStop>,
 	/// Until when the sign-in failure copy button reads "Copied".
 	sign_in_copied: Option<f64>,
 	forgetting: bool,
@@ -1186,6 +1194,46 @@ struct Desktop {
 	#[cfg(feature = "demo")]
 	synthetic_id: u64,
 	token_input: Zeroizing<String>,
+}
+/// Why a connection ended. Fixed labels, flags and redacted details only, so the diagnostics
+/// report can show it whether or not logging was on.
+struct SessionStop {
+	reason: &'static str,
+	detail: Option<Box<str>>,
+	/// Whether the connection had reached READY.
+	ready: bool,
+	gateway: Option<(discord_gateway::Report, std::time::Instant)>,
+	at: std::time::Instant,
+}
+/// One Gateway report as a diagnostics line: its own constants and numbers.
+fn describe_gateway_report(
+	(report, at): &(discord_gateway::Report, std::time::Instant),
+	now: std::time::Instant,
+) -> String {
+	use discord_gateway::Action;
+	use std::fmt::Write;
+	let mut line = match report.action {
+		Action::Reconnecting => "closed, reconnecting".to_owned(),
+		Action::Recovering { wait_secs } => {
+			format!("fresh session {} after {wait_secs} s", report.recoveries)
+		}
+		Action::BudgetSpent => "fresh-session budget spent".to_owned(),
+		Action::Stopped => "stopped".to_owned(),
+	};
+	let _ = write!(line, " · {}", report.cause);
+	if let Some(code) = report.code {
+		let _ = write!(line, " {code}");
+	}
+	if !report.dispatch.is_empty() {
+		let _ = write!(line, " {}", report.dispatch);
+	}
+	let _ = write!(
+		line,
+		" · ready={} · {} s ago",
+		report.ready,
+		now.duration_since(*at).as_secs()
+	);
+	line
 }
 /// Records the few session and gateway milestones that explain a reconnect. Payloads, identifiers
 /// and credentials never reach the log: only fixed labels and the event's own kind.
@@ -1446,6 +1494,65 @@ fn select_demo_group(state: &mut State) {
 	}
 }
 
+/// `--demo-loading`: fetched data stays pending forever, so loading states can be captured.
+/// Synthetic artwork (avatars, icons, badges, covers, banners) is withheld and open profile cards
+/// keep loading too. `--demo-loading=partial` keeps the first history page and People rows, with
+/// their artwork, so only older history and further rows stay pending.
+#[cfg(feature = "demo")]
+fn demo_loading() -> bool {
+	std::env::args().any(|arg| arg == "--demo-loading" || arg == "--demo-loading=partial")
+}
+/// `--demo-loading=partial`; see [`demo_loading`].
+#[cfg(feature = "demo")]
+fn demo_loading_partial() -> bool {
+	std::env::args().any(|arg| arg == "--demo-loading=partial")
+}
+
+/// Reads the offline fixture would answer; `--demo-loading` leaves them unanswered.
+#[cfg(feature = "demo")]
+fn demo_fetch(command: &Command) -> bool {
+	use client_core::{channel_actions, onboarding, polls, reactions, user_actions};
+	match command {
+		Command::ChannelAction { action, .. } => matches!(
+			action,
+			channel_actions::Action::Reference
+				| channel_actions::Action::Load
+				| channel_actions::Action::PostLoad
+		),
+		Command::ServerAdmin { action, .. } => !action.write(),
+		Command::ServerSettings { edit, .. } => edit.is_none(),
+		Command::Onboarding { action, .. } => matches!(action, onboarding::Action::Load { .. }),
+		Command::GuildFolders(change) => change.is_none(),
+		Command::MessagingPermissions { change, .. } => change.is_none(),
+		Command::EditProfile { changes, .. } => changes.is_none(),
+		Command::GifFavorites { change, .. } => change.is_none(),
+		Command::UserAction { action, .. } => matches!(action, user_actions::Action::LoadNote(_)),
+		Command::Polls(request) => matches!(request.action, polls::Action::Read),
+		Command::Reactions(command) => matches!(
+			command,
+			reactions::Command::Read { .. } | reactions::Command::Users { .. }
+		),
+		Command::StickerPacks
+		| Command::Sticker(_)
+		| Command::ApplicationCommands { .. }
+		| Command::MemberSearch(_)
+		| Command::Invite { .. }
+		| Command::ForumSummaries { .. }
+		| Command::ForumPosts { .. }
+		| Command::Archives { .. }
+		| Command::Pins { .. }
+		| Command::Search { .. }
+		| Command::ThreadStarter { .. }
+		| Command::ThreadPreview { .. }
+		| Command::Gifs { .. }
+		| Command::Profile { .. }
+		| Command::StreamPreview { .. }
+		| Command::Members { .. }
+		| Command::History { .. } => true,
+		_ => false,
+	}
+}
+
 /// Synthetic People rows with presence; never a Discord member directory.
 #[cfg(feature = "demo")]
 fn demo_members(
@@ -1676,6 +1783,10 @@ impl Desktop {
 				}
 			};
 		}
+		#[cfg(feature = "demo")]
+		let demo_loading = demo && demo_loading();
+		#[cfg(feature = "demo")]
+		let demo_loading_partial = demo_loading && demo_loading_partial();
 		#[cfg(feature = "demo")]
 		if demo && std::env::args().any(|arg| arg == "--demo-group-dm") {
 			// Existing synthetic group conversation; no account or call is opened.
@@ -2146,7 +2257,9 @@ impl Desktop {
 					.map(|rest| rest.trim_start_matches('=').to_owned())
 			}) {
 			// `--demo-account` or `--demo-account=status` for the written-status variant.
-			if let Some(Command::EditProfile { user, request, .. }) = state.load_own_profile() {
+			if let Some(Command::EditProfile { user, request, .. }) = state.load_own_profile()
+				&& !demo_loading
+			{
 				let profile = ui::synthetic_own_profile(state.user.as_ref().expect("demo user"));
 				state.apply(client_core::Envelope {
 					generation: state.generation,
@@ -2306,7 +2419,15 @@ impl Desktop {
 		let mut sign_in_forget = None;
 		#[cfg(feature = "demo")]
 		if demo && std::env::args().any(|arg| arg == "--demo-join-server") {
-			messaging.preview_join_server(state.generation);
+			if demo_loading {
+				// Offline lookups never start, so this one is pending from the outset.
+				state
+					.invites
+					.insert("serein".into(), (std::time::Instant::now(), None));
+				messaging.open_rpc_invite(state.generation, "serein".into());
+			} else {
+				messaging.preview_join_server(state.generation);
+			}
 			state.status = "Offline fixture · join-server dialog opened at startup";
 		}
 		#[cfg(feature = "demo")]
@@ -2371,6 +2492,41 @@ impl Desktop {
 			// The new editor fixture includes a known server default: mentions only.
 			state.guilds[0].default_message_notifications = Some(1);
 			messaging.preview_server_notifications(&mut state, guild);
+		}
+		#[cfg(feature = "demo")]
+		if demo_loading {
+			// Withhold artwork before the first frame paints it; the per-frame hold keeps it so.
+			if !demo_loading_partial {
+				messaging.hold_demo_images();
+			}
+			// Data the fixture pre-seeds is requested again instead; `demo_fetch` never answers.
+			if demo_loading_partial {
+				// The latest page and the first People rows stay; scrolling asks for more.
+				if let Some(Command::Members {
+					guild: guild @ Some(_),
+					channel: Some(channel),
+					request,
+					..
+				}) = state.request_members()
+				{
+					let mut list = demo_members(&state, guild, channel, request);
+					list.lazy = true;
+					list.total = 60;
+					state.members = Some(list);
+				}
+			} else if state.selected.is_some() {
+				state.timeline.clear();
+				let _ = state.history(None);
+				state.members = None;
+			}
+			if let Some(channel) = state.selected {
+				let _ = state.request_application_commands(channel, true);
+			}
+			state.stickers.packs.clear();
+			state.stickers.loaded = false;
+			state.stickers.loading = true;
+			// Offline messaging permissions settle in client-core without a command.
+			state.messaging_permissions.pending = true;
 		}
 		let mut hotkeys = platform::hotkeys::Hotkeys::new({
 			let ctx = cc.egui_ctx.clone();
@@ -2525,6 +2681,10 @@ impl Desktop {
 			tray_error: None,
 			#[cfg(feature = "demo")]
 			demo_typing,
+			#[cfg(feature = "demo")]
+			demo_loading,
+			#[cfg(feature = "demo")]
+			demo_loading_partial,
 			variant_changed: false,
 			pending_save: None,
 			pending_account_save: None,
@@ -2539,6 +2699,7 @@ impl Desktop {
 			presence_saved: None,
 			confirming_forget: sign_in_forget,
 			sign_in_copied: None,
+			last_stop: None,
 			credential_status: if demo {
 				"Fixture mode skips saved login; extensions use public GitHub downloads"
 			} else if loading_saved {
@@ -2707,9 +2868,47 @@ impl Desktop {
 		let _ = writeln!(report, "- **Saved login:** {}", self.credential_status);
 		let _ = writeln!(
 			report,
-			"- **Session:** authenticated={} gateway={}",
+			"- **Session:** authenticated={} gateway={} connection={}",
 			self.state.auth == AuthState::Authenticated,
-			self.state.gateway_connected
+			self.state.gateway_connected,
+			self.connection.is_some()
+		);
+		let now = std::time::Instant::now();
+		let or_none = |text: &str| if text.is_empty() { "none" } else { text }.to_owned();
+		let _ = writeln!(report, "- **Status:** {}", or_none(self.state.status));
+		let _ = writeln!(
+			report,
+			"- **Failure detail:** {}",
+			or_none(self.state.failure_detail.as_deref().unwrap_or_default())
+		);
+		let stop = self.last_stop.as_ref();
+		let _ = writeln!(
+			report,
+			"- **Last stop:** {}",
+			stop.map_or_else(
+				|| "none".to_owned(),
+				|stop| format!(
+					"{} · {} · ready={} · {} s ago",
+					stop.reason,
+					or_none(stop.detail.as_deref().unwrap_or_default()),
+					stop.ready,
+					now.duration_since(stop.at).as_secs()
+				)
+			)
+		);
+		// A live connection's latest Gateway report, else the one its stop kept.
+		let gateway = self
+			.connection
+			.as_ref()
+			.and_then(|connection| *connection.gateway_report.lock().ok()?)
+			.or_else(|| stop?.gateway);
+		let _ = writeln!(
+			report,
+			"- **Gateway:** {}",
+			gateway.map_or_else(
+				|| "no close, recovery or stop recorded".to_owned(),
+				|gateway| describe_gateway_report(&gateway, now)
+			)
 		);
 		let call = match self.state.voice.active.as_ref() {
 			Some(call) if call.phase == client_core::voice::Phase::Failed => "failed",
@@ -2898,6 +3097,28 @@ impl Desktop {
 		}
 		self.messaging.reading_status = self.reading.status();
 	}
+	/// Applies mute (bit 1) and deafen (bit 2) toggles from a hotkey or the tray.
+	fn toggle_voice(&mut self, toggles: u8) {
+		if toggles == 0 || self.fixture_only {
+			return;
+		}
+		// Toggle from the newest choice; a mute and deafen in one frame apply in order.
+		let mut latest = None;
+		if toggles & 1 != 0 {
+			latest = Some(self.messaging.toggle_voice(false));
+		}
+		if toggles & 2 != 0 {
+			latest = Some(self.messaging.toggle_voice(true));
+		}
+		let (muted, deafened) =
+			latest.unwrap_or((self.messaging.voice_muted, self.messaging.voice_deafened));
+		if self.state.auth == AuthState::Authenticated
+			&& let Some(command) = self.state.set_call_mute(muted, deafened)
+			&& !self.state.demo
+		{
+			self.command(command);
+		}
+	}
 	fn sync_tray(&mut self, ctx: &egui::Context) {
 		let previous_status = self.messaging.tray_status;
 		self.tray_setting.observe(self.messaging.minimize_to_tray);
@@ -2966,6 +3187,25 @@ impl Desktop {
 				platform::tray::VoiceState::Unmuted
 			};
 			tray.set_voice_state(voice_state);
+			tray.set_menu(&platform::tray::Menu {
+				account: self
+					.state
+					.user
+					.as_ref()
+					.filter(|_| self.state.demo || self.state.auth == AuthState::Authenticated)
+					.map(|user| user.name.as_str()),
+				call: self
+					.state
+					.voice
+					.active
+					.as_ref()
+					.filter(|call| call.phase != client_core::voice::Phase::Failed)
+					.and_then(|call| self.state.channel(call.channel))
+					.map(|channel| channel.name.as_str()),
+				pings: self.notification_runtime.pings(),
+				muted,
+				deafened,
+			});
 		}
 		if self.tray_window.hidden && !self.background_available() {
 			self.tray_window.show(ctx);
@@ -3714,6 +3954,9 @@ impl Desktop {
 		}
 		#[cfg(feature = "demo")]
 		if self.state.demo {
+			if self.demo_loading && demo_fetch(&command) {
+				return;
+			}
 			let event = match command {
 				// Offline typing has no transport or synthetic state change.
 				Command::Typing { .. } => return,
@@ -3839,6 +4082,14 @@ impl Desktop {
 				Command::ServerAction { action, request } => {
 					server_settings_demo::execute_action(&mut self.state, action, request)
 				}
+				// Synthetic settings writes are confirmed as sent.
+				Command::ChannelList { request, write, .. } => {
+					Event::ChannelList(client_core::channel_list::Event::Written {
+						guild: write.guild,
+						request,
+						result: Ok(write),
+					})
+				}
 				Command::UserAction {
 					action: client_core::user_actions::Action::OpenDm(user),
 					request,
@@ -3881,6 +4132,7 @@ impl Desktop {
 						Action::Leave(_) => None,
 						Action::Edit { name, icon, .. } => Some(model::ChannelPatch {
 							user_limit: Patch::Absent,
+							slowmode: Patch::Absent,
 							id: channel,
 							name: name.map_or(Patch::Absent, Patch::Value),
 							icon: match icon {
@@ -4064,6 +4316,7 @@ impl Desktop {
 						request,
 						result: Ok(model::Channel {
 							user_limit: None,
+							slowmode: 0,
 							id: model::Id(self.synthetic_id),
 							guild: Some(guild),
 							parent_id: Some(parent),
@@ -4117,6 +4370,7 @@ impl Desktop {
 						.into_iter()
 						.map(|id| model::Channel {
 							user_limit: None,
+							slowmode: 0,
 							id: model::Id(id),
 							guild: Some(guild),
 							parent_id: Some(parent),
@@ -4578,6 +4832,41 @@ impl Desktop {
 }
 
 impl Desktop {
+	/// `--demo-loading`: client-core settles these offline without sending a command, so they
+	/// are held open each frame like the fetches `demo_fetch` leaves unanswered.
+	#[cfg(feature = "demo")]
+	fn hold_demo_loading(&mut self) {
+		let state = &mut self.state;
+		// Full mode: the fixture seeds some profiles (your own, `--demo-profile`), yet every open
+		// card waits, the docked DM card included. Partial keeps the seeded ones.
+		let full = !self.demo_loading_partial;
+		if let Some(view) = state
+			.profile
+			.as_mut()
+			.filter(|view| full || view.data.is_none())
+		{
+			if full {
+				view.data = None;
+			}
+			view.loading = true;
+			view.error = None;
+		}
+		if let Some(forum) = state.selected.filter(|id| state.is_forum(*id)) {
+			state.posts.parent = Some(forum);
+			state.posts.loading = true;
+		}
+		// The installed-font scan is local, but its list shows the same loading state.
+		if matches!(
+			self.messaging.custom_font.request,
+			Some(ui::fonts::Action::List)
+		) {
+			self.messaging.custom_font.request = None;
+		}
+		// Full mode withholds synthetic artwork: images stay on their loading placeholder too.
+		if full {
+			self.messaging.hold_demo_images();
+		}
+	}
 	fn clear_avatars(&mut self, ctx: &egui::Context) {
 		self.avatar_start_failed = false;
 		if self.avatar_cleanup.is_some() && !self.fixture_only && !self.state.demo {
@@ -5087,6 +5376,7 @@ impl Desktop {
 		let mut events = Vec::new();
 		let mut terminal = None;
 		let mut expiry = None;
+		let mut stopped = None;
 		if let Some(connection) = &mut self.connection {
 			for _ in 0..client_core::EVENT_SLOTS {
 				match connection.events.try_recv() {
@@ -5114,9 +5404,13 @@ impl Desktop {
 				events.push(failure);
 			}
 			terminal = *connection.terminal.borrow();
-			if terminal == Some(Failure::Expired) {
+			if terminal.is_some() {
 				let ready = connection.ready.load(std::sync::atomic::Ordering::Relaxed);
-				expiry = Some((connection.expiry.get().cloned(), ready));
+				let gateway = connection.gateway_report.lock().ok().and_then(|slot| *slot);
+				stopped = Some((ready, gateway));
+				if terminal == Some(Failure::Expired) {
+					expiry = Some((connection.expiry.get().cloned(), ready));
+				}
 			}
 		}
 		let mut persist_timeline = false;
@@ -5397,6 +5691,7 @@ impl Desktop {
 							.map_or("unrecorded", |cause| cause.source)
 							.into(),
 					),
+					("ready", stopped.is_some_and(|(ready, _)| ready).into()),
 				],
 			);
 			for (setting, scope) in [
@@ -5421,6 +5716,14 @@ impl Desktop {
 			self.voice.stop();
 			self.messaging.camera_test_requested = false;
 			self.messaging.camera_test_texture = None;
+			// The transport is gone whatever the failure: a stop that does not end the session
+			// in shared state must still stop reporting a connected Gateway.
+			if !failure.ends_session() {
+				self.state.apply(Envelope {
+					generation: self.state.generation,
+					event: Event::Disconnected,
+				});
+			}
 			self.state.apply(Envelope {
 				generation: self.state.generation,
 				event: Event::Failure(failure),
@@ -5444,6 +5747,14 @@ impl Desktop {
 			if !matches!(self.state.auth, AuthState::Expired | AuthState::Challenged) {
 				self.state.auth = AuthState::Failed;
 			}
+			let (ready, gateway) = stopped.unwrap_or_default();
+			self.last_stop = Some(SessionStop {
+				reason: failure.label(),
+				detail: self.state.failure_detail.clone(),
+				ready,
+				gateway,
+				at: std::time::Instant::now(),
+			});
 			for pending in &mut self.state.pending {
 				if pending.delivery == Delivery::Sending {
 					pending.delivery = Delivery::Ambiguous;
@@ -5827,6 +6138,10 @@ impl eframe::App for Desktop {
 		);
 		self.messaging.sync_reading_zoom(ctx);
 		self.poll(ctx);
+		#[cfg(feature = "demo")]
+		if self.demo_loading {
+			self.hold_demo_loading();
+		}
 		// Here, not in `ui`: a connection made while hidden in the tray must still go idle.
 		if let Some(connection) = &mut self.connection {
 			// shortcut: the timeout is read once per connection; a change made on another
@@ -5871,24 +6186,7 @@ impl eframe::App for Desktop {
 			| self
 				.messaging
 				.voice_toggle_pressed(ctx, |action, chord| self.hotkeys.is_global(action, chord));
-		if voice_toggles != 0 && !self.fixture_only {
-			// Toggle from the newest choice; a mute and deafen in one frame apply in order.
-			let mut latest = None;
-			if voice_toggles & 1 != 0 {
-				latest = Some(self.messaging.toggle_voice(false));
-			}
-			if voice_toggles & 2 != 0 {
-				latest = Some(self.messaging.toggle_voice(true));
-			}
-			let (muted, deafened) =
-				latest.unwrap_or((self.messaging.voice_muted, self.messaging.voice_deafened));
-			if self.state.auth == AuthState::Authenticated
-				&& let Some(command) = self.state.set_call_mute(muted, deafened)
-				&& !self.state.demo
-			{
-				self.command(command);
-			}
-		}
+		self.toggle_voice(voice_toggles);
 		if self.updater.sync(
 			ctx,
 			&self.runtime,
@@ -5970,10 +6268,10 @@ impl eframe::App for Desktop {
 				);
 			}
 		}
-		let mut tray_events = Vec::with_capacity(4);
+		let mut tray_events = Vec::with_capacity(8);
 		if let Some(tray) = &mut self.tray {
 			// The Linux worker can refill event bits while this frame consumes them.
-			for _ in 0..4 {
+			for _ in 0..8 {
 				let Some(event) = tray.take_event() else {
 					break;
 				};
@@ -5988,6 +6286,15 @@ impl eframe::App for Desktop {
 					self.user_quit(ctx);
 				}
 				platform::tray::Event::Show => self.tray_window.show(ctx),
+				platform::tray::Event::ToggleMute => self.toggle_voice(1),
+				platform::tray::Event::ToggleDeafen => self.toggle_voice(2),
+				platform::tray::Event::Disconnect => {
+					if !self.fixture_only
+						&& let Some(command) = self.state.leave_call()
+					{
+						self.command(command);
+					}
+				}
 				#[cfg(target_os = "linux")]
 				platform::tray::Event::Minimize => {
 					if !quitting {
@@ -6953,7 +7260,8 @@ impl eframe::App for Desktop {
 					self.messaging.accept_avatar(&ctx, key, None);
 				}
 			}
-			// Idle frames are freed on a pass, so an otherwise idle window wakes once for them.
+			// Idle frames are freed, and stalled image placeholders give way to fallback art, on a
+			// pass, so an otherwise idle window wakes once for them.
 			if let Some(at) = self.messaging.avatar_release_at() {
 				ctx.request_repaint_after(at.saturating_duration_since(std::time::Instant::now()));
 			}

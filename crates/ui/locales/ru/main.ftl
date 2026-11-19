@@ -408,6 +408,15 @@ message-request-title = Запрос на переписку
 ## crates/ui/src/channel_menu.rs
 # Context: context
 channel-menu-context-add-to-favorites = Добавить в избранное
+channel-menu-context-remove-from-channel-list = Убрать из списка каналов
+channel-menu-context-add-to-channel-list = Добавить в список каналов
+channel-browser-title = Обзор каналов
+channel-browser-subtitle = Выберите, какие каналы показывать в списке.
+channel-browser-show-all-channels = Показать все каналы
+channel-browser-search = Поиск каналов
+channel-browser-follow-category = Следить за категорией
+channel-browser-saving = Сохранение…
+channel-browser-unavailable = Настройки списка каналов сейчас недоступны.
 # Context: context
 channel-menu-context-copy-channel-id = Копировать идентификатор канала
 # Context: context
@@ -2414,8 +2423,6 @@ search-pane-hide-matching-text-highlight = Скрыть выделение со�
 # Context: pane
 search-pane-indexing-is-incomplete-results-may-be-missing = Индексация неполная; результаты могут отсутствовать.
 # Context: pane
-search-pane-looking-for-matching-messages = Ищем соответствующие сообщения.
-# Context: pane
 search-pane-messages-are-unavailable-while-disconnected-or-without-channel-access = Сообщения недоступны при отключении или отсутствии доступа к каналу.
 # Context: pane
 search-pane-newest-first = Сначала самые новые
@@ -3607,6 +3614,8 @@ slash-commands-composer-choose-a-different-command = выбери другую �
 slash-commands-composer-command-unavailable-your-arguments-are-kept = Команда недоступна. Ваши аргументы сохранены.
 # Context: footer
 slash-commands-footer-refresh-application-commands = Обновить команды приложения
+# Context: list
+slash-commands-list-loading-application-commands = Загрузка команд приложений…
 
 ## crates/ui/src/stickers.rs
 # Context: message
@@ -4896,6 +4905,7 @@ profiles-status-clear = Очистить статус
 send-throttled-title = Полегче, слишком остро
 send-throttled-body = Вы отправляете сообщения слишком быстро!
 send-throttled-dismiss = В зону спокойствия
+slowmode-enabled = Медленный режим включён
 profiles-private-profile = Закрытый профиль
 profiles-private-notice = Профиль { $name } закрыт, поэтому часть сведений скрыта. Добавьте пользователя в друзья, чтобы увидеть больше.
 settings-cosmetics-name-styles = Стили имён

@@ -208,6 +208,20 @@ Normal-account use remains unofficial. Local WebSocket regressions exercise the
 recovery policy; they do not establish the cause of issue #577's macOS Wi-Fi
 failure or prove live Discord recovery.
 
+After READY, Gateway traffic Serein cannot read no longer ends the connection:
+a corrupt compressed frame, an unreadable packet or dispatch (a failed READY
+included), or an unsupported opcode starts a fresh session. It identifies again
+and never resumes, because the resume cursor has already moved past the unread
+event. The waits are 30, 60 and 120 seconds, and the fourth failure within 30
+minutes stops the connection as before. That limit is local policy, not a
+verified Discord quota; how the service weighs repeated identifies from a normal
+account is unverified. Stop-listed close codes, capacity limits, a refusing event
+queue and Serein's own input faults still stop without a retry, and the initial
+login is unchanged. Each close, recovery and stop is recorded with fixed labels
+(cause, close code or opcode, handled dispatch name) for the diagnostics log and
+report. Local WebSocket regressions cover this policy; the cause of issue #1043
+is not established.
+
 ## Profile boards — October 7, 2026
 
 The full profile reads game widgets from the existing on-demand profile response,
@@ -607,6 +621,26 @@ The selected channel stays visible. A preloaded user-settings proto update does
 not clear these mutes. Create Channel, Create Category and Invite to Server reuse the same
 permission checks, confirmation UI and request lanes as the existing channel and
 server menus.
+
+Browse Channels, Show All Channels and Remove from / Add to Channel List use Discord's
+opt-in channel list, unofficial and documented by discord-userdoccers: the user guild
+settings `flags` bit `OPT_IN_CHANNELS_ON` (1 << 14) hides channels without the channel
+override flag `OPT_IN_ENABLED` (1 << 12), and `OPT_IN_CHANNELS_OFF` (1 << 13) shows all
+channels. READY and User Guild Settings Update restore the flags; unknown flags (including
+any override with null flags) list every channel and disable the controls. A followed
+category lists its channels. On a server that never used the list (neither mode bit set and
+nothing followed), the first removal follows every category and uncategorized channel; a
+saved selection, even an empty one, is kept across Show All Channels. Removing a channel
+from a followed category follows its siblings instead, so only the removed item leaves the
+list. Each change is one bounded `PATCH /users/@me/guilds/{guild}/settings` that preserves
+the other flag bits, is built from the newest known settings right before it is sent, and
+must be echoed before the sidebar changes. A live capture showed Discord omits `flags` when it
+is 0 and drops an override left with only defaults, so both read as 0; explicit null is
+ambiguous. The open channel and the active call stay listed, and
+removed channels do not light the server's unread marker. Discord's client offers these
+controls in Community servers; Serein shows them wherever the settings row is known, and
+the official client may ignore the flags outside Community servers. Onboarding default
+channels are not read separately (unverified).
 
 Text/announcement editing (name, topic, slowmode and age restriction), channel
 duplication, text/voice/announcement/forum channel and category creation, and confirmed deletion use the documented
@@ -1136,7 +1170,11 @@ Unknown relationship/settings state is distinguished from false. One write is pe
 rejections, disconnects and ambiguous outcomes remain visible without automatic retries.
 Gateway updates take precedence over late HTTP confirmations. Notification suppression reuses
 the existing account settings and rejects alerts from known blocked authors. Existing timeline
-content is retained; this does not implement Discord's collapsed blocked-message presentation.
+content is retained. By default the native blocked-message presentation is unchanged; an explicit
+device-local Chat preference can omit known blocked authors from visible main/thread-starter rows,
+with a second option for known ignored authors. Unknown relationship state does not hide a row,
+and filtering does not mark messages read or mutate relationships. This local presentation filter
+is not Discord's collapsed blocked-group implementation or a service-side moderation change.
 Offline reducer, decoder and local HTTP tests cover these actions; normal-user acceptance,
 cross-device behavior and native interaction remain live-unverified. No accounts were accessed.
 
@@ -1720,7 +1758,7 @@ colors survive READY, role updates and role catalog reconciliation. Chat authors
 member names, profile names and role labels render static two-stop gradients or three-stop
 holographic colors. Equal positions favor the lower role ID, consistent with
 [discord.py role comparison](https://github.com/Rapptz/discord.py/blob/master/discord/role.py).
-Names retain hue when readable; the theme adjusts insufficient contrast, including hover.
+Names keep their role hue. A color short of WCAG AA on the surface behind the name is lightened or darkened along that hue, and desaturated only if the extreme value still fails. Role mention text is checked against the role tint composited over the panel. The hovered message-row fill is not part of the chat-name check.
 Profile name colors and role chips prefer current self/member assignments, including empty
 assignments, and fall back to fetched profile roles when current membership is unavailable.
 Profile chips list those assignments from the top of the hierarchy: higher `position` first,
@@ -2499,7 +2537,8 @@ applications resolves to none. Discord itself detects some of these games by unk
 (unverified); Serein still cannot detect them from a process alone. Matching compares path suffixes longest-first, plus `.app` bundle
 components for macOS entries; an executable-name index keeps a full sweep at roughly 6 ms for
 900 processes instead of ~920 ms for a linear scan. Processes are enumerated read-only through
-`/proc` on Linux, `ps` on macOS and `tasklist` on Windows: executable paths only, never
+`/proc` on Linux, `ps` on macOS and `tasklist` plus a limited-query image-path read on Windows
+(a bare image name such as `gh.exe` otherwise matches an unrelated game): executable paths only, never
 arguments, environment, memory or another user's processes. Detection is polled every ten
 seconds while sharing is on, keeps a running match stable rather than flapping between two
 matches, and always loses to a connected client, which knows more than a process name.
@@ -3220,10 +3259,17 @@ does not establish the current Electron application's complete behavior.
   account attention required. Pending requests recheck the latch after admission,
   cooldown and proxy configuration waits. Already dispatched requests may finish.
   40001 stops the session as expired; 40012 remains a linked-resource refusal; a guild ban (40007) remains local.
+- HTTP 401 stops the session as expired and records the response's JSON error code
+  with the redacted route. The exception is 401 with code 60003, which the
+  unofficial user-API notes describe as an MFA check on a valid token: it stops
+  the session as a security challenge and keeps the saved login. Unverified
+  against a live account.
 - Gateway 4001–4005 and 4008 stop recovery. Discord permits reconnection for
   several of these; Serein deliberately requires explicit reconnection so a bad
   producer cannot repeatedly send invalid or rate-limited payloads. Normal
-  network recovery and 4007/4009 fresh identification remain supported.
+  network recovery and 4007/4009 fresh identification remain supported. 4015
+  (unofficial: too many open user-account sessions) stops as well, because each
+  new identify would add another session.
 - Voice 4021 (rate limit) and 4022 (call terminated) join 4014 in terminal call
   handling, preventing the desktop automatic rejoin loop.
 - Attachment staging and storage PUT remain single-attempt, with one explicit

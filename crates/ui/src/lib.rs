@@ -24,6 +24,7 @@ mod categories;
 pub use categories::debug_thread_navigation_check;
 #[cfg(feature = "demo")]
 pub use timeline::debug_unread_navigation_check;
+mod channel_browser;
 mod channel_marks;
 mod channel_menu;
 mod channel_permissions;
@@ -124,6 +125,8 @@ mod server_stickers;
 mod settings;
 mod setup;
 mod shortcuts;
+mod skeleton;
+mod slowmode;
 mod switcher;
 mod text_menu;
 mod thumbhash;
@@ -200,6 +203,17 @@ fn shift_clicked(ui: &egui::Ui, response: &egui::Response) -> bool {
 		})
 	})
 }
+
+/// Height of every member list row, group header or person.
+const MEMBER_ROW: f32 = 42.0;
+
+/// A person row that has not arrived, where `member_rows` paints the 32px avatar inset 8px and
+/// the name 12px after it. Status lines are optional, so only the name is drawn.
+const PENDING_MEMBER: skeleton::Row = skeleton::Row {
+	lines: 1,
+	height: MEMBER_ROW,
+	..skeleton::Row::PERSON
+};
 
 fn thread_member_rows<'a>(
 	state: &'a State,
@@ -294,6 +308,7 @@ pub struct MessagingUi {
 	group_menu: group_menu::GroupMenu,
 	server_menu: server_menu::ServerMenu,
 	channel_menu: channel_menu::ChannelMenu,
+	channel_browser: channel_browser::ChannelBrowser,
 	pub channel_preferences: model::ChannelPreferences,
 	pub channel_preferences_changed: bool,
 	pub channel_preferences_loaded: bool,
@@ -309,6 +324,10 @@ pub struct MessagingUi {
 	rail_cache: notifications::RailCache,
 	composer_layout: composer_text::Layout,
 	channel_cache: categories::Cache,
+	/// Rows the server banner holds at the head of the channel list; zero without one.
+	banner_rows: usize,
+	/// The channel list's viewport and scroll offset as last drawn, for the banner riding it.
+	channel_list_view: Option<(egui::Rect, f32)>,
 	channel_move: Option<(Id, client_core::channel_actions::Action)>,
 	search: search::SearchUi,
 	settings: settings::Settings,
@@ -348,6 +367,9 @@ pub struct MessagingUi {
 	dm_profile_link: Option<String>,
 	profile_formatted: markdown::FormatCache,
 	pub reading_preferences: model::ReadingPreferences,
+	/// Local render filters only; neither changes relationships nor service-side read state.
+	pub hide_blocked_messages: bool,
+	pub hide_ignored_messages: bool,
 	pub show_hidden_channels: bool,
 	/// Folds the home list's message requests away; the device preference restores it.
 	pub message_requests_collapsed: bool,
@@ -1235,7 +1257,20 @@ impl MessagingUi {
 		self.voice_fullscreen_request.take()
 	}
 	pub fn clear_avatars(&mut self) {
+		// The `--demo-loading` artwork hold is a setting, not cached data, so it survives.
+		#[cfg(feature = "demo")]
+		let hold = self.avatars.hold_demo_images;
 		self.avatars = avatars::Avatars::default();
+		#[cfg(feature = "demo")]
+		{
+			self.avatars.hold_demo_images = hold;
+		}
+	}
+	/// `--demo-loading`: withhold synthetic artwork, so avatars, icons and badges show their
+	/// loading state.
+	#[cfg(feature = "demo")]
+	pub fn hold_demo_images(&mut self) {
+		self.avatars.hold_demo_images = true;
 	}
 	pub fn take_avatar_requests(&mut self) -> Vec<String> {
 		self.avatars.take_requests()
@@ -1274,6 +1309,9 @@ impl MessagingUi {
 			minimize_to_tray: self.minimize_to_tray,
 			tray_available: self.tray_available,
 			tray_status: self.tray_status,
+			// Device-level chat filters belong to the device, not to the account being cleared.
+			hide_blocked_messages: self.hide_blocked_messages,
+			hide_ignored_messages: self.hide_ignored_messages,
 			startup_enabled: self.startup_enabled,
 			startup_minimized: self.startup_minimized,
 			startup_available: self.startup_available,
@@ -1660,23 +1698,6 @@ impl MessagingUi {
 					.on_hover_text(&text);
 				});
 		}
-		if !has_entry {
-			ui.add_space(8.0);
-			if list.freshness != Freshness::Fresh {
-				let text = if list.freshness == Freshness::Unavailable {
-					language.text("people-unavailable")
-				} else {
-					language.text("loading-people")
-				};
-				ui.label(RichText::new(text).small().color(colors.muted));
-			} else {
-				ui.label(
-					RichText::new(language.text("no-people"))
-						.small()
-						.color(colors.muted),
-				);
-			}
-		}
 		// Thread snapshots contain people only; paged channel lists supply their own headers.
 		let thread_rows = (!list.lazy
 			&& state
@@ -1700,8 +1721,61 @@ impl MessagingUi {
 		} else {
 			thread_rows.as_ref().map_or(list.slots.len(), Vec::len)
 		};
+		// An invalidated list keeps its total but will not fill its slots, so it shows no
+		// placeholders.
+		let placeholders = list.freshness != Freshness::Unavailable;
+		if !has_entry {
+			if placeholders && list.freshness != Freshness::Fresh {
+				if row_count == 0 {
+					// Guild and thread lists both open with a group header such as ONLINE — N,
+					// its 12px label centred below a 16px top margin; as many people as fit
+					// follow it.
+					let people = ((ui.available_height() - MEMBER_ROW) / MEMBER_ROW)
+						.floor()
+						.max(1.0) as usize;
+					ui.scope(|ui| {
+						ui.spacing_mut().item_spacing.y = 0.0;
+						let (header, _) = ui.allocate_exact_size(
+							egui::vec2(ui.available_width(), MEMBER_ROW),
+							egui::Sense::hover(),
+						);
+						skeleton::bar(
+							ui.painter(),
+							skeleton::fill(ui),
+							egui::pos2(header.left() + 8.0, header.top() + 24.0),
+							egui::vec2(72.0, 10.0),
+						);
+						skeleton::rows(
+							ui,
+							&language.text("loading-people"),
+							PENDING_MEMBER,
+							people,
+						);
+					});
+					return;
+				}
+				// Otherwise the list's own empty slots hold the placeholders below.
+			} else if !placeholders {
+				ui.add_space(8.0);
+				ui.label(
+					RichText::new(language.text("people-unavailable"))
+						.small()
+						.color(colors.muted),
+				);
+			} else {
+				ui.add_space(8.0);
+				ui.label(
+					RichText::new(language.text("no-people"))
+						.small()
+						.color(colors.muted),
+				);
+			}
+		}
 		let row_spacing = ui.spacing().item_spacing.y;
 		ui.spacing_mut().item_spacing.y = 0.0;
+		// Slots that have not arrived yet hold a person placeholder; only the first visible one
+		// is announced.
+		let mut announced = false;
 		let mut visible = 0usize..0;
 		let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
 		if reset_scroll {
@@ -1710,7 +1784,7 @@ impl MessagingUi {
 		let output = self
 			.scroll
 			.attach(ui, ("people", guild_or_channel, list.request), area)
-			.show_rows(ui, 42.0, row_count, |ui, range| {
+			.show_rows(ui, MEMBER_ROW, row_count, |ui, range| {
 				visible = range.clone();
 				for index in range {
 					let slot = if lazy {
@@ -1754,7 +1828,7 @@ impl MessagingUi {
 								.map(|count| format!("{name} - {count}"))
 								.unwrap_or(name);
 							let (rect, _) = ui.allocate_exact_size(
-								egui::vec2(ui.available_width(), 42.0),
+								egui::vec2(ui.available_width(), MEMBER_ROW),
 								egui::Sense::hover(),
 							);
 							let mut header = ui.new_child(
@@ -1795,7 +1869,7 @@ impl MessagingUi {
 							let online =
 								status.is_some_and(|s| matches!(s, "online" | "idle" | "dnd"));
 							let (rect, response) = ui.allocate_exact_size(
-								egui::vec2(ui.available_width(), 42.0),
+								egui::vec2(ui.available_width(), MEMBER_ROW),
 								egui::Sense::click(),
 							);
 							response.widget_info(|| {
@@ -2004,9 +2078,24 @@ impl MessagingUi {
 								}
 							});
 						}
+						None if placeholders => {
+							let label = if std::mem::replace(&mut announced, true) {
+								String::new()
+							} else {
+								language.text("loading-people")
+							};
+							skeleton::custom(
+								ui,
+								&label,
+								egui::vec2(ui.available_width(), MEMBER_ROW),
+								|painter, rect, fill| {
+									skeleton::paint_row(painter, fill, rect, PENDING_MEMBER, index);
+								},
+							);
+						}
 						None => {
 							ui.allocate_exact_size(
-								egui::vec2(ui.available_width(), 42.0),
+								egui::vec2(ui.available_width(), MEMBER_ROW),
 								egui::Sense::hover(),
 							);
 						}
@@ -2049,15 +2138,67 @@ impl MessagingUi {
 	) {
 		let colors = design::palette(ui);
 		let language = self.language;
+		const HEADER: f32 = 48.0;
+		let banner = self
+			.guild
+			.and_then(|guild| state.guild(guild))
+			.and_then(model::Guild::banner_key);
+		// Discord's 16:9 server banner starts behind the header and holds whole rows at the head
+		// of the channel list, so it scrolls away with the channels. 8px part it from them.
+		let column = ui.available_rect_before_wrap();
+		let rows = (((column.width() * 9.0 / 16.0).min(135.0) - HEADER) / categories::CHANNEL_ROW)
+			.round()
+			.max(1.0);
+		let below = rows * categories::CHANNEL_ROW - 8.0;
+		let scrolled = self
+			.channel_list_view
+			.map_or(0.0, |(_, offset)| offset.max(0.0));
+		let art = banner.map(|key| {
+			let seen = egui::Rect::from_min_max(
+				column.min,
+				egui::pos2(
+					column.right(),
+					column.top() + (HEADER + below - scrolled).max(HEADER),
+				),
+			);
+			// An animated banner plays only under the pointer.
+			let hovered = ui.rect_contains_pointer(seen);
+			let color = colors.accent.gamma_multiply(0.4);
+			self.avatars
+				.guild_banner(ui.ctx(), key, hovered, color, state.demo)
+		});
+		// A banner that failed to load gives its rows back.
+		self.banner_rows = match art {
+			Some(Ok(_) | Err(true)) => rows as usize,
+			_ => 0,
+		};
+		// How far the header has turned from the banner's top into the plain bar: not at all at
+		// rest, fully once the banner has scrolled away, and ahead of the scroll in between.
+		let bar = |offset: f32| {
+			let left = 1.0 - (offset / below).clamp(0.0, 1.0);
+			1.0 - left * left
+		};
+		let on_banner = matches!(art, Some(Ok(_))) && bar(scrolled) < 0.5;
+		let rule = if matches!(art, Some(Ok(_))) {
+			bar(scrolled)
+		} else {
+			1.0
+		};
+		// Reserved under the name and under the list; filled once the list reports its scroll.
+		let mut backdrop = None;
 		egui::Panel::top("sidebar-header")
-			.exact_size(48.0)
+			.exact_size(HEADER)
 			.show_separator_line(false)
 			.frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 0)))
 			.show(ui, |ui| {
 				let rect = ui.max_rect();
+				backdrop = Some((
+					ui.painter().add(egui::Shape::Noop),
+					rect.expand2(egui::vec2(16.0, 0.0)),
+				));
 				ui.horizontal_centered(|ui| {
 					if let Some(guild) = self.guild {
-						self.server_menu.header(ui, state, guild, title);
+						self.server_menu.header(ui, state, guild, title, on_banner);
 						return;
 					}
 					ui.add(
@@ -2071,14 +2212,15 @@ impl MessagingUi {
 				ui.painter().hline(
 					rect.x_range().expand(16.0),
 					rect.bottom(),
-					egui::Stroke::new(1.0, colors.border),
+					egui::Stroke::new(1.0, colors.border.gamma_multiply(rule)),
 				);
 			});
+		let under_list = ui.painter().add(egui::Shape::Noop);
 		egui::Frame::new()
 			.inner_margin(egui::Margin {
 				left: 8,
 				right: 8,
-				top: 8,
+				top: if self.banner_rows > 0 { 0 } else { 8 },
 				bottom: 0,
 			})
 			.show(ui, |ui| {
@@ -2214,6 +2356,82 @@ impl MessagingUi {
 					commands.push(command);
 				}
 			});
+		if self.banner_rows > 0
+			&& let Some(art) = art
+			&& let Some((under_name, header)) = backdrop
+			&& let Some((list, offset)) = self.channel_list_view
+		{
+			let top = list.top() - offset;
+			let frame = egui::Rect::from_min_max(
+				egui::pos2(header.left(), top - HEADER),
+				egui::pos2(header.right(), top + below),
+			);
+			let listed = ui.painter().with_clip_rect(egui::Rect::from_min_max(
+				egui::pos2(header.left(), list.top()),
+				egui::pos2(header.right(), list.bottom()),
+			));
+			match art {
+				Ok(texture) => {
+					let uv = avatars::cover_uv(texture.resolution_vec2(), frame.size());
+					listed.set(
+						under_list,
+						egui::Shape::image(texture.id(), frame, uv, egui::Color32::WHITE),
+					);
+					// At rest the name sits on the banner under a shade that fades out by the
+					// header's lower edge. Scrolling thins both away, leaving the plain bar.
+					let fade = 1.0 - bar(offset.max(0.0));
+					let seen = header.intersect(frame);
+					if fade > 0.0 && seen.is_positive() {
+						// One mesh carries the image, its shade and the rounded corner of the
+						// surface the lists sit on, which a plain image would square off.
+						let radius = if design::has_window_background(ui) {
+							0.0
+						} else {
+							8.0f32.min(seen.height())
+						};
+						const STEPS: usize = 8;
+						let mut outline = Vec::with_capacity(STEPS + 4);
+						for step in 0..=STEPS {
+							let angle = std::f32::consts::FRAC_PI_2 * step as f32 / STEPS as f32;
+							outline.push(
+								seen.left_top()
+									+ egui::vec2(1.0 - angle.cos(), 1.0 - angle.sin()) * radius,
+							);
+						}
+						outline.extend([seen.right_top(), seen.right_bottom(), seen.left_bottom()]);
+						let mut mesh = egui::Mesh::with_texture(texture.id());
+						for pos in std::iter::once(seen.center()).chain(outline) {
+							let at = (pos - frame.min) / frame.size();
+							let shade = 150.0 / 255.0
+								* fade * (1.0 - (pos.y - header.top()) / header.height())
+								.clamp(0.0, 1.0);
+							let level = (255.0 * fade * (1.0 - shade)) as u8;
+							mesh.vertices.push(egui::epaint::Vertex {
+								pos,
+								uv: uv.min + at * uv.size(),
+								color: egui::Color32::from_rgba_premultiplied(
+									level,
+									level,
+									level,
+									(255.0 * fade) as u8,
+								),
+							});
+						}
+						let rim = mesh.vertices.len() as u32 - 1;
+						for point in 1..=rim {
+							mesh.add_triangle(0, point, point % rim + 1);
+						}
+						ui.painter()
+							.with_clip_rect(header)
+							.set(under_name, egui::Shape::mesh(mesh));
+					}
+				}
+				Err(_) => listed.set(
+					under_list,
+					egui::Shape::rect_filled(frame, 0, skeleton::fill(ui)),
+				),
+			}
+		}
 	}
 	/// Account card; while in a call it grows upward with the call header and quick actions.
 	fn account_card(&mut self, ui: &mut egui::Ui, state: &mut State, commands: &mut Vec<Command>) {
@@ -4172,7 +4390,15 @@ impl MessagingUi {
                             && self.slash_commands.can_submit(state, channel);
                         if (send || slash_run) && !cancel_edit {
                             if let Some((edit_channel, message, content)) = &editing {
-                                if state.freshness == Freshness::Fresh
+                                // Like the official client, saving an emptied edit asks to delete the
+                                // message. Attachments would outlive the text, so those keep the edit.
+                                if content.trim().is_empty()
+                                    && state.timeline.get(*message).is_some_and(|target| {
+                                        target.channel == *edit_channel && target.attachments.is_empty()
+                                    })
+                                {
+                                    self.deleting = Some((*edit_channel, *message));
+                                } else if state.freshness == Freshness::Fresh
                                     && let Some(command) = state.prepare_edit(*edit_channel, *message,
                                         if self.convert_emoticons { emoticons::convert(content) } else { content.clone() })
                                 {
@@ -4395,6 +4621,9 @@ impl MessagingUi {
 			.is_none()
 			.then(|| state.known_profile(recipient.id))
 			.flatten();
+		// `--demo-loading` keeps the docked card loading, like every open profile card.
+		#[cfg(feature = "demo")]
+		let cached = cached.filter(|_| !self.avatars.hold_demo_images);
 		self.dm_profile.calls_blocked = self.calls_unavailable(state);
 		let mut action = None;
 		// The panel shares the conversation surface, so the card floats on the chat itself.
@@ -5060,6 +5289,22 @@ impl MessagingUi {
 		}
 		self.server_menu
 			.show(&ctx, state, self.guild, &mut commands, &mut self.avatars);
+		if let Some(guild) = self
+			.channel_menu
+			.browse_requested
+			.take()
+			.or(self.server_menu.browse_requested.take())
+		{
+			self.channel_browser.open(state, guild);
+		}
+		if let Some((guild, change)) = self.server_menu.channel_list_requested.take()
+			&& Some(guild) == self.guild
+			&& let Some(command) = state.change_channel_list(guild, change)
+		{
+			commands.push(command);
+		}
+		self.channel_browser
+			.show(&ctx, state, self.guild, &mut commands);
 		if let Some(guild) = self.server_menu.settings_requested.take()
 			&& let Some(command) = self.preview_server_settings(state, guild)
 		{
@@ -5499,6 +5744,8 @@ impl MessagingUi {
 					.show(ui, |ui| {
 						design::paint_chat_background(ui, ui.available_rect_before_wrap());
 						self.timeline.hide_media_links = self.reading_preferences.hide_media_links;
+						self.timeline.hide_blocked_messages = self.hide_blocked_messages;
+						self.timeline.hide_ignored_messages = self.hide_ignored_messages;
 						self.timeline.compact_messages = self.reading_preferences.compact_messages;
 						self.timeline.double_click_reaction = self
 							.reading_preferences
@@ -5577,12 +5824,14 @@ impl MessagingUi {
 						{
 							commands.push(command);
 						}
-						crate::reactions::show_users(
+						if let Some(user) = crate::reactions::show_users(
 							ui.ctx(),
 							state,
 							&mut self.avatars,
 							&mut commands,
-						);
+						) {
+							self.profile.open_full(user);
+						}
 						if let Some((channel, message)) = self.timeline.quick_delete.take()
 							&& let Some(command) = state.prepare_delete(channel, message)
 						{
@@ -6093,6 +6342,13 @@ impl MessagingUi {
 				Some(dialog::Choice::Confirmed) => {
 					if let Some(command) = state.prepare_delete(channel, message) {
 						commands.push(command);
+						// An emptied edit has nothing left to keep once its message goes.
+						if self.editing.as_ref().is_some_and(|(c, id, text)| {
+							*c == channel && *id == message && text.trim().is_empty()
+						}) {
+							self.editing = None;
+							self.edit_sent = None;
+						}
 					}
 					self.deleting = None;
 				}
@@ -6188,15 +6444,19 @@ mod composer_tests {
 	use client_core::MAX_CONTENT;
 
 	#[test]
-	fn clearing_an_account_preserves_the_device_log_preference() {
+	fn clearing_an_account_preserves_device_level_preferences() {
 		let mut ui = MessagingUi {
 			diagnostics_log: diagnostics::Level::Info,
 			diagnostics_log_path: Some("local-log".into()),
+			hide_blocked_messages: true,
+			hide_ignored_messages: true,
 			..Default::default()
 		};
 		ui.clear();
 		assert_eq!(ui.diagnostics_log, diagnostics::Level::Info);
 		assert_eq!(ui.diagnostics_log_path.as_deref(), Some("local-log"));
+		// Account filters are device preferences; clearing one account must not turn them off.
+		assert!(ui.hide_blocked_messages && ui.hide_ignored_messages);
 		assert!(!ui.open_log_folder_requested);
 	}
 
@@ -6790,6 +7050,28 @@ mod composer_tests {
 	}
 
 	#[test]
+	fn saving_an_emptied_edit_asks_to_delete_and_keeps_the_edit_open() {
+		let mut state = edit_state();
+		let mut view = MessagingUi {
+			editing: Some((Id(10), Id(20), String::new())),
+			..Default::default()
+		};
+		let ctx = egui::Context::default();
+		edit_frame(&ctx, &mut view, &mut state, vec![]);
+		let commands = edit_frame(
+			&ctx,
+			&mut view,
+			&mut state,
+			vec![edit_key(egui::Key::Enter)],
+		);
+		// Nothing leaves before the confirmation, and declining it must not lose the edit.
+		assert!(commands.is_empty());
+		assert_eq!(view.deleting, Some((Id(10), Id(20))));
+		assert!(view.has_edit());
+		assert_eq!(state.timeline.get(Id(20)).unwrap().content, "Original");
+	}
+
+	#[test]
 	fn emoticon_conversion_edits_wait_for_confirmation_and_keep_raw_text_on_failure() {
 		for success in [false, true] {
 			let mut state = edit_state();
@@ -6912,6 +7194,7 @@ mod composer_tests {
 			selected: Some(Id(10)),
 			channels: vec![model::Channel {
 				user_limit: None,
+				slowmode: 0,
 				id: Id(10),
 				guild: None,
 				parent_id: None,
@@ -7242,6 +7525,7 @@ mod composer_tests {
 		let mut state = edit_state();
 		state.demo = false;
 		state.guilds.push(model::Guild {
+			banner: None,
 			default_message_notifications: None,
 			stickers: None,
 			id: Id(100),
@@ -7393,6 +7677,7 @@ mod composer_tests {
 			target.kind = 0;
 			state.channels.push(target);
 			state.guilds.push(model::Guild {
+				banner: None,
 				default_message_notifications: None,
 				stickers: None,
 				id: Id(100),
@@ -7524,6 +7809,7 @@ mod composer_tests {
 				target.name = "Malformed-origin cached target".into();
 				state.channels.push(target);
 				state.guilds.push(model::Guild {
+					banner: None,
 					id: Id(100),
 					name: "Malformed-origin cached server".into(),
 					icon: None,
@@ -8861,6 +9147,7 @@ mod composer_tests {
 			state.selected = Some(Id(11));
 			state.channels.push(model::Channel {
 				user_limit: None,
+				slowmode: 0,
 				id: Id(11),
 				guild: None,
 				kind: 1,
@@ -8935,6 +9222,7 @@ mod composer_tests {
 			selected: Some(Id(1)),
 			channels: vec![model::Channel {
 				user_limit: None,
+				slowmode: 0,
 				last_message: None,
 				id: Id(1),
 				guild: Some(Id(2)),
@@ -9129,6 +9417,7 @@ mod composer_tests {
 			}),
 			channels: vec![model::Channel {
 				user_limit: None,
+				slowmode: 0,
 				last_message: None,
 				id: Id(1),
 				guild: None,
@@ -9531,6 +9820,7 @@ mod composer_tests {
 				selected: Some(Id(1)),
 				channels: vec![model::Channel {
 					user_limit: None,
+					slowmode: 0,
 					last_message: None,
 					id: Id(1),
 					guild,
@@ -10022,6 +10312,7 @@ mod composer_tests {
 			selected: Some(Id(1)),
 			channels: vec![model::Channel {
 				user_limit: None,
+				slowmode: 0,
 				last_message: None,
 				id: Id(1),
 				guild: None,

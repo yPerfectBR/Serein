@@ -146,6 +146,8 @@ struct Extras<'a> {
 	context: Option<client_core::fingerprint::MessageContext>,
 	/// Builds the JSON body after cooldown and route admission.
 	prepare: Option<&'a mut (dyn FnMut() -> Result<serde_json::Value, Failure> + Send)>,
+	/// A rejected token returns `Expired` without ending the session; the Gateway decides.
+	advisory: bool,
 }
 
 enum RequestContent {
@@ -227,6 +229,21 @@ fn invite_captcha(bytes: &[u8]) -> Option<client_core::captcha::Challenge> {
 		c.captcha_session_id.take().map(Cow::into_owned),
 		c.should_serve_invisible,
 	)
+}
+/// The JSON error code of a rejected request, read from at most 4 KiB of body. `None` when
+/// the body is missing, larger or not the service's error shape.
+async fn error_code(response: wreq::Response) -> Option<u64> {
+	const MAX_BYTES: usize = 4096;
+	let mut bytes = Vec::new();
+	let mut body = std::pin::pin!(response.bytes_stream());
+	while let Some(chunk) = futures_util::StreamExt::next(&mut body).await {
+		let chunk = chunk.ok()?;
+		if bytes.len() + chunk.len() > MAX_BYTES {
+			return None;
+		}
+		bytes.extend_from_slice(&chunk);
+	}
+	decode::<ErrorBody>(&bytes).ok()?.code
 }
 /// Headers the web client was observed sending on every REST call (unofficial). How the
 /// service weighs them is unverified. Locale and timezone are the operating system's.
@@ -486,10 +503,25 @@ impl DiscordApi {
 	}
 	/// Keeps the first cause only, so later teardown cannot mask the response that ended it.
 	pub fn note_expiry(&self, source: &'static str, route: Option<Box<str>>) {
-		let _ = self.expiry.set(Expiry { source, route });
+		let _ = self.expiry.set(Expiry {
+			source,
+			code: None,
+			route,
+		});
 	}
-	fn expire(&self, source: &'static str, method: &Method, path: &str) -> Failure {
-		self.note_expiry(source, Some(route_label(method, path)));
+	fn expire(
+		&self,
+		source: &'static str,
+		code: Option<u64>,
+		method: &Method,
+		path: &str,
+	) -> Failure {
+		let _ = self.expiry.set(Expiry {
+			source,
+			// A JSON error code is a small number; anything larger is not one.
+			code: code.and_then(|code| u32::try_from(code).ok()),
+			route: Some(route_label(method, path)),
+		});
 		self.stop();
 		Failure::Expired
 	}
@@ -594,8 +626,7 @@ impl DiscordApi {
 			Extras {
 				retry,
 				challenge,
-				context: None,
-				prepare: None,
+				..Extras::default()
 			},
 		)
 		.await
@@ -619,7 +650,7 @@ impl DiscordApi {
 					retry,
 					challenge,
 					context: Some(context),
-					prepare: None,
+					..Extras::default()
 				},
 			)
 			.await?;
@@ -642,6 +673,7 @@ impl DiscordApi {
 			mut challenge,
 			context,
 			mut prepare,
+			advisory,
 		} = extras;
 		// Only typed adapter methods construct paths. Never accept a URL or route from UI/content.
 		if !path.starts_with('/')
@@ -795,7 +827,17 @@ impl DiscordApi {
 				.and_then(|s| s.parse::<f64>().ok());
 
 			if status == StatusCode::UNAUTHORIZED {
-				return Err(self.expire("REST HTTP 401", &method, path));
+				if advisory {
+					return Err(Failure::Expired);
+				}
+				let code = error_code(response).await;
+				// Unofficial: a route that wants a fresh MFA check answers a valid token with
+				// 401 and code 60003. That is a challenge, not an expired session.
+				if code == Some(60003) {
+					self.stop_with(Failure::Challenged);
+					return Err(Failure::Challenged);
+				}
+				return Err(self.expire("REST HTTP 401", code, &method, path));
 			}
 			let cloudflare_block = response
 				.headers()
@@ -848,7 +890,10 @@ impl DiscordApi {
 			if !status.is_success() {
 				let error = decode::<ErrorBody>(&bytes).unwrap_or_default();
 				if matches!(error.code, Some(40001)) {
-					return Err(self.expire("REST code 40001", &method, path));
+					if advisory {
+						return Err(Failure::Expired);
+					}
+					return Err(self.expire("REST code 40001", None, &method, path));
 				}
 
 				if error.code == Some(40012) {
@@ -1314,6 +1359,15 @@ impl DiscordApi {
 					result: self.server_action(action).await,
 				})
 			}
+			Command::ChannelList {
+				request,
+				write,
+				latest,
+			} => Event::ChannelList(client_core::channel_list::Event::Written {
+				guild: write.guild,
+				request,
+				result: self.channel_list_write(&write, &latest).await.map(Box::new),
+			}),
 			Command::UserAction {
 				action,
 				request,
@@ -4034,7 +4088,13 @@ mod tests {
 		}
 		for (status, body, expected) in [
 			("302 Found", "", Failure::Protocol),
-			("401 Unauthorized", "{}", Failure::Expired),
+			(
+				"401 Unauthorized",
+				"{\"message\":\"401: Unauthorized\",\"code\":0}",
+				Failure::Expired,
+			),
+			// A valid token asked for a fresh MFA check is challenged, not expired.
+			("401 Unauthorized", "{\"code\":60003}", Failure::Challenged),
 			(
 				"403 Forbidden",
 				"{\"captcha_key\":[\"challenge\"]}",
@@ -4064,6 +4124,41 @@ mod tests {
 			if expected.ends_session() {
 				assert!(api.stopped());
 			}
+			// Only a real expiry records a cause, with the code that tells one 401 from another.
+			assert_eq!(
+				api.expiry.get().map(|expiry| expiry.code),
+				(expected == Failure::Expired).then_some(Some(0))
+			);
+			task.await.unwrap();
+		}
+		// Regression (#1003): a 401 on the advisory pre-READY status read must not end the
+		// session before the Gateway answers; the same 401 on an ordinary read still does.
+		{
+			let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+			let address = listener.local_addr().unwrap();
+			let task = tokio::spawn(async move {
+				for _ in 0..2 {
+					let (mut socket, _) = listener.accept().await.unwrap();
+					let mut buffer = [0; 4096];
+					let _ = socket.read(&mut buffer).await.unwrap();
+					socket
+						.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+						.await
+						.unwrap();
+				}
+			});
+			let mut api = DiscordApi::new(Arc::new(
+				SessionSecret::from_owner_input("SYNTHETIC_SECRET_MARKER".into()).unwrap(),
+			))
+			.unwrap();
+			api.base = format!("http://{address}");
+			assert_eq!(
+				api.account_status_before_ready().await.unwrap_err(),
+				Failure::Expired
+			);
+			assert!(!api.stopped());
+			assert_eq!(api.account_status().await.unwrap_err(), Failure::Expired);
+			assert!(api.stopped());
 			task.await.unwrap();
 		}
 		fn limited(status: &str, body: &str) -> String {
